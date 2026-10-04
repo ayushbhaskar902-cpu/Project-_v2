@@ -116,6 +116,27 @@ class AppState:
         )
         self.optimizer.llm = self.llm
 
+        # Research Engine composition
+        from .discovery import CatalogDiscovery
+        from .evaluation import EvaluationEngine, RobustnessEngine
+        from .generator import AlphaGenerationPipeline
+        from .leaderboard import LeaderboardService
+        from .learning import ResearchMemory, SelfLearningEngine
+        from .orchestrator import MultiLLMOrchestrator
+        from .portfolio import AlphaPoolOptimizer
+        from .prompts import PromptLibrary
+
+        self.discovery = CatalogDiscovery(self.catalog)
+        self.prompt_library = PromptLibrary()
+        self.pipeline = AlphaGenerationPipeline(self.llm, self.prompt_library, self.discovery)
+        self.orchestrator = MultiLLMOrchestrator(self.db, self.pipeline)
+        self.evaluation = EvaluationEngine(self.db)
+        self.robustness = RobustnessEngine(self.db)
+        self.memory = ResearchMemory(self.db)
+        self.learning = SelfLearningEngine(self.db, self.memory, self.llm)
+        self.leaderboard = LeaderboardService(self.db)
+        self.pool_optimizer = AlphaPoolOptimizer(self.db)
+
         self._renew_lock = asyncio.Lock()
         self._last_session_check = float("-inf")
         self._last_login_attempt = float("-inf")

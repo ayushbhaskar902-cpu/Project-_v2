@@ -348,6 +348,7 @@ class BatchEngine:
                     SimulationRecord.status == SimStatus.QUEUED,
                     # The documented task for work nobody owns; it has no study by design.
                     SimulationRecord.task != MANUAL_TASK,
+                    ~SimulationRecord.task.like("research_session_%"),
                     SimulationRecord.task.not_in(select(Study.task)),
                 )
                 .values(

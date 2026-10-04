@@ -41,6 +41,12 @@ const data = createRoute({
   component: lazyRouteComponent(() => import('@/screens/data'), 'DataScreen'),
 })
 
+const researchRoute = createRoute({
+  getParentRoute: () => root,
+  path: '/research',
+  component: lazyRouteComponent(() => import('@/screens/research'), 'ResearchStudioScreen'),
+})
+
 const labs = createRoute({ getParentRoute: () => root, path: '/labs' })
 const labsIndex = createRoute({
   getParentRoute: () => labs,
@@ -208,6 +214,7 @@ const routeTree = root.addChildren([
   dashboard,
   matrix,
   data,
+  researchRoute,
   labs.addChildren([labsIndex, searchLab, templateLab, evolutionLab, powerPoolLab, superAlphaLab]),
   tools.addChildren([toolsIndex, settingsSampler, submissionPlanner, correlationBreaker]),
   competitionsRoute,

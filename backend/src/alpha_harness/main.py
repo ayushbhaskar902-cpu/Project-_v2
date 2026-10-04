@@ -38,6 +38,7 @@ from .api import (
     power_pool_lab,
     preferences,
     quarter,
+    research,
     search_lab,
     sims,
     super_lab,
@@ -188,6 +189,7 @@ def create_app() -> FastAPI:
     app.include_router(competitions.router)
     app.include_router(update.router)
     app.include_router(preferences.router)
+    app.include_router(research.router)
     app.include_router(ws.router)
 
     @app.get("/api/health", tags=["meta"])

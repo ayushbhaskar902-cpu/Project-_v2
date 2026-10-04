@@ -69,6 +69,12 @@ export const NAV = [
     icon: DatabaseIcon,
   },
   {
+    to: '/research',
+    group: 'Research',
+    label: 'Research Studio',
+    icon: SparklesIcon,
+  },
+  {
     to: '/labs',
     group: 'Research',
     label: 'Research Labs',

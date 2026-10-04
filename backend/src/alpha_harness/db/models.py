@@ -605,3 +605,432 @@ class Submission(Base):
 
     alpha_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     submitted_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
+# --- research engine ------------------------------------------------------
+#
+# The self-learning multi-LLM research engine. A ``ResearchSession`` is one autonomous
+# campaign: the user gives a prompt, a budget, and a set of models, and the engine runs
+# generation → simulation → evaluation → learning cycles until the budget runs out.
+#
+# Every table here is new. Columns are nullable or carry a ``server_default`` so the
+# additive migrator can add them to a database that already has the rest of Alpha Harness.
+
+
+class ResearchStatus(StrEnum):
+    """Lifecycle of a research session or a generation within it."""
+
+    IDLE = "IDLE"
+    RUNNING = "RUNNING"
+    PAUSED = "PAUSED"
+    LEARNING = "LEARNING"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+
+
+class CandidateStatus(StrEnum):
+    """Lifecycle of one generated alpha candidate."""
+
+    DRAFT = "DRAFT"
+    VALID = "VALID"
+    INVALID = "INVALID"
+    QUEUED = "QUEUED"
+    SIMULATING = "SIMULATING"
+    EVALUATED = "EVALUATED"
+    REJECTED = "REJECTED"
+    ACCEPTED = "ACCEPTED"
+
+
+class ResearchSession(Base):
+    """One autonomous multi-LLM research campaign.
+
+    Created when the user hits Start on the Research Studio. Owns every researcher,
+    candidate, evaluation and learning insight produced during its run. The ``prompt``
+    is the user's seed idea; the engine refines it through self-learning.
+
+    ``learning_frequency`` is the number of completed simulations between strategy
+    updates. With 8 BRAIN slots × 10 items per multi-sim = 80 per round, the default
+    is 80 so a full round finishes before the learning loop fires.
+    """
+
+    __tablename__ = "research_session"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(200))
+    prompt: Mapped[str | None] = mapped_column(Text)
+
+    #: Market scope, frozen when the session starts.
+    instrument_type: Mapped[str] = mapped_column(String(16), default="EQUITY", server_default="EQUITY")
+    region: Mapped[str | None] = mapped_column(String(16))
+    universe: Mapped[str | None] = mapped_column(String(32))
+    delay: Mapped[int | None] = mapped_column(Integer, server_default="1")
+
+    #: Budget and cadence.
+    simulation_budget: Mapped[int | None] = mapped_column(Integer, server_default="500")
+    simulations_used: Mapped[int | None] = mapped_column(Integer, server_default="0")
+    learning_frequency: Mapped[int | None] = mapped_column(Integer, server_default="80")
+    current_generation: Mapped[int | None] = mapped_column(Integer, server_default="0")
+
+    #: Which LLM models to use, as a JSON list of ``provider:model`` refs.
+    model_refs: Mapped[list[Any] | None] = mapped_column(JSON, server_default="[]")
+    #: Extra constraints the user sets: min Sharpe, max turnover, target datasets, etc.
+    constraints: Mapped[dict[str, Any] | None] = mapped_column(JSON, server_default="{}")
+
+    status: Mapped[str | None] = mapped_column(
+        String(16), default=ResearchStatus.IDLE, server_default="IDLE", index=True
+    )
+    message: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+
+
+class ResearchResearcher(Base):
+    """One LLM agent persona inside a research session.
+
+    Each row configures a single model instance with its own system prompt persona,
+    temperature, and strategy focus. The session's orchestrator dispatches work to every
+    active researcher in parallel and tracks per-model statistics here.
+    """
+
+    __tablename__ = "research_researcher"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_session.id", ondelete="CASCADE"), index=True
+    )
+
+    #: ``provider:model`` reference, matching :func:`~.llm.registry.model_ref`.
+    model_ref: Mapped[str | None] = mapped_column(String(200))
+    #: Human label for this agent (e.g. "Momentum Explorer", "Quality Analyst").
+    label: Mapped[str | None] = mapped_column(String(128))
+    #: Research focus: momentum, mean_reversion, value, quality, volatility, general.
+    strategy_focus: Mapped[str | None] = mapped_column(String(64), server_default="general")
+    #: The system prompt persona injected before every generation call.
+    system_prompt: Mapped[str | None] = mapped_column(Text)
+    temperature: Mapped[float | None] = mapped_column(Float, server_default="0.8")
+
+    #: Running statistics, updated after each evaluation cycle.
+    total_generated: Mapped[int | None] = mapped_column(Integer, server_default="0")
+    total_valid: Mapped[int | None] = mapped_column(Integer, server_default="0")
+    total_simulated: Mapped[int | None] = mapped_column(Integer, server_default="0")
+    total_accepted: Mapped[int | None] = mapped_column(Integer, server_default="0")
+    avg_sharpe: Mapped[float | None] = mapped_column(Float)
+    avg_fitness: Mapped[float | None] = mapped_column(Float)
+    best_sharpe: Mapped[float | None] = mapped_column(Float)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, server_default="0")
+
+    enabled: Mapped[bool | None] = mapped_column(default=True, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow)
+
+
+class PromptStrategy(Base):
+    """A versioned prompt template for alpha generation.
+
+    Prompt strategies are the unit of prompt experimentation. Each version captures a
+    snapshot of the system prompt additions, example patterns, operator guidance, and
+    dataset hints that the generation pipeline injects. The self-learning engine creates
+    new versions when it discovers better patterns.
+
+    Performance statistics are updated after evaluation so prompts can be compared and
+    ranked on the leaderboard.
+    """
+
+    __tablename__ = "prompt_strategy"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(200))
+    version: Mapped[int | None] = mapped_column(Integer, server_default="1")
+    #: Category of research strategy: momentum, mean_reversion, value, quality, etc.
+    category: Mapped[str | None] = mapped_column(String(64))
+    #: The full prompt template text, with ``{placeholders}`` for dynamic injection.
+    template_text: Mapped[str | None] = mapped_column(Text)
+    #: Structured guidance extracted by the learning engine: operator tips, field tips, etc.
+    guidance: Mapped[dict[str, Any] | None] = mapped_column(JSON, server_default="{}")
+    #: Example expressions that performed well, injected as few-shot context.
+    examples: Mapped[list[Any] | None] = mapped_column(JSON, server_default="[]")
+    #: Anti-patterns: expressions or patterns to explicitly avoid.
+    anti_patterns: Mapped[list[Any] | None] = mapped_column(JSON, server_default="[]")
+
+    #: Performance tracking, updated by the evaluation engine.
+    times_used: Mapped[int | None] = mapped_column(Integer, server_default="0")
+    total_candidates: Mapped[int | None] = mapped_column(Integer, server_default="0")
+    valid_rate: Mapped[float | None] = mapped_column(Float)
+    avg_sharpe: Mapped[float | None] = mapped_column(Float)
+    avg_fitness: Mapped[float | None] = mapped_column(Float)
+    top_decile_rate: Mapped[float | None] = mapped_column(Float)
+    oos_stability: Mapped[float | None] = mapped_column(Float)
+
+    #: Which session created this version, if any (null for seed prompts).
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_session.id", ondelete="SET NULL")
+    )
+    #: The previous version this one was derived from, for lineage tracking.
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_strategy.id", ondelete="SET NULL")
+    )
+
+    is_active: Mapped[bool | None] = mapped_column(default=True, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        Index("ix_prompt_strategy_active", "is_active", "category"),
+    )
+
+
+class ResearchCandidate(Base):
+    """One alpha expression generated by an LLM researcher.
+
+    Tracks the full lineage: which session, which researcher, which prompt strategy, and
+    which generation produced it. The ``hypothesis`` is the LLM's stated reasoning; the
+    ``expression`` is the BRAIN-ready code. Validation results from :mod:`.labs.fastexpr`
+    are stored so a syntax error can be fed back to the LLM for retry.
+
+    Links to ``simulation_record`` once the candidate reaches the BatchEngine queue, and
+    to ``alpha_id`` once BRAIN completes the simulation.
+    """
+
+    __tablename__ = "research_candidate"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_session.id", ondelete="CASCADE"), index=True
+    )
+    researcher_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_researcher.id", ondelete="SET NULL"), index=True
+    )
+    prompt_strategy_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_strategy.id", ondelete="SET NULL")
+    )
+    generation: Mapped[int | None] = mapped_column(Integer, server_default="0")
+
+    #: The LLM's stated reasoning for this alpha.
+    hypothesis: Mapped[str | None] = mapped_column(Text)
+    #: The BRAIN Fast Expression or Python alpha code.
+    expression: Mapped[str | None] = mapped_column(Text)
+    language: Mapped[str | None] = mapped_column(String(16), server_default="FASTEXPR")
+
+    #: Which datasets and fields the expression references, extracted by the parser.
+    datasets_used: Mapped[list[Any] | None] = mapped_column(JSON, server_default="[]")
+    fields_used: Mapped[list[Any] | None] = mapped_column(JSON, server_default="[]")
+    operator_count: Mapped[int | None] = mapped_column(Integer)
+    field_count: Mapped[int | None] = mapped_column(Integer)
+
+    #: AST validation result.
+    is_valid: Mapped[bool | None] = mapped_column()
+    validation_error: Mapped[str | None] = mapped_column(Text)
+    #: How many LLM retry attempts were needed (0 = first try was valid).
+    retry_count: Mapped[int | None] = mapped_column(Integer, server_default="0")
+
+    #: Simulation linkage, set once the candidate enters the BatchEngine queue.
+    simulation_record_id: Mapped[int | None] = mapped_column(
+        ForeignKey("simulation_record.id", ondelete="SET NULL"), index=True
+    )
+    alpha_id: Mapped[str | None] = mapped_column(String(64), index=True)
+
+    #: BRAIN simulation settings used.
+    sim_region: Mapped[str | None] = mapped_column(String(16))
+    sim_universe: Mapped[str | None] = mapped_column(String(32))
+    sim_neutralization: Mapped[str | None] = mapped_column(String(32))
+    sim_decay: Mapped[int | None] = mapped_column(Integer)
+    sim_delay: Mapped[int | None] = mapped_column(Integer)
+
+    status: Mapped[str | None] = mapped_column(
+        String(16), default=CandidateStatus.DRAFT, server_default="DRAFT", index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+
+    __table_args__ = (
+        Index("ix_candidate_session_gen", "session_id", "generation"),
+        Index("ix_candidate_session_status", "session_id", "status"),
+    )
+
+
+class ResearchEvaluation(Base):
+    """Post-simulation quantitative evaluation of one alpha candidate.
+
+    Separates in-sample (IS) from out-of-sample (OOS) metrics. The IS/OOS gap is the
+    primary overfitting signal: ``(is_sharpe - oos_sharpe) / is_sharpe``. A composite
+    score ranks alphas on the leaderboard.
+
+    Always one-to-one with a :class:`ResearchCandidate` that reached COMPLETE.
+    """
+
+    __tablename__ = "research_evaluation"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_candidate.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+    )
+
+    #: In-sample metrics (train period, typically first 8 of 10 years).
+    is_sharpe: Mapped[float | None] = mapped_column(Float)
+    is_fitness: Mapped[float | None] = mapped_column(Float)
+    is_turnover: Mapped[float | None] = mapped_column(Float)
+    is_returns: Mapped[float | None] = mapped_column(Float)
+    is_drawdown: Mapped[float | None] = mapped_column(Float)
+    is_margin: Mapped[float | None] = mapped_column(Float)
+
+    #: Out-of-sample metrics (test period, typically last 2 of 10 years).
+    oos_sharpe: Mapped[float | None] = mapped_column(Float)
+    oos_fitness: Mapped[float | None] = mapped_column(Float)
+    oos_turnover: Mapped[float | None] = mapped_column(Float)
+    oos_returns: Mapped[float | None] = mapped_column(Float)
+    oos_drawdown: Mapped[float | None] = mapped_column(Float)
+
+    #: Full-period metrics (all 10 years combined).
+    full_sharpe: Mapped[float | None] = mapped_column(Float)
+    full_fitness: Mapped[float | None] = mapped_column(Float)
+    after_cost_sharpe: Mapped[float | None] = mapped_column(Float)
+
+    #: Overfitting signals.
+    is_oos_gap: Mapped[float | None] = mapped_column(Float)
+    #: Sharpe decay ratio: (IS Sharpe - OOS Sharpe) / IS Sharpe, 0 is perfect, 1 is total.
+    sharpe_decay: Mapped[float | None] = mapped_column(Float)
+
+    #: Composite leaderboard score:
+    #:   0.4 * after_cost_sharpe + 0.3 * fitness + 0.2 * (1 - sharpe_decay) - 0.1 * turnover
+    composite_score: Mapped[float | None] = mapped_column(Float)
+
+    #: BRAIN submission check results, if fetched.
+    checks: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    checks_passed: Mapped[int | None] = mapped_column(Integer)
+    checks_total: Mapped[int | None] = mapped_column(Integer)
+
+    evaluated_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=utcnow)
+
+
+class ResearchRobustness(Base):
+    """Perturbation and sensitivity tests for an evaluated alpha.
+
+    Each row is one test applied to one candidate. The test type names what was varied
+    (neutralization, decay, universe, region) and the result says whether the alpha
+    survived the perturbation. A candidate must pass all mandatory tests to be ACCEPTED.
+
+    Kept separate from :class:`ResearchEvaluation` because a candidate may undergo many
+    tests, each with its own settings and outcome.
+    """
+
+    __tablename__ = "research_robustness"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_candidate.id", ondelete="CASCADE"), index=True
+    )
+
+    #: What was tested: "neutralization", "decay", "universe", "region", "time_period".
+    test_type: Mapped[str | None] = mapped_column(String(32))
+    #: The specific perturbation: e.g. "SECTOR" for neutralization, "10" for decay.
+    test_value: Mapped[str | None] = mapped_column(String(64))
+    #: The simulation that ran the perturbed alpha, if any.
+    simulation_record_id: Mapped[int | None] = mapped_column(
+        ForeignKey("simulation_record.id", ondelete="SET NULL")
+    )
+
+    #: Metrics under the perturbed setting.
+    perturbed_sharpe: Mapped[float | None] = mapped_column(Float)
+    perturbed_fitness: Mapped[float | None] = mapped_column(Float)
+    perturbed_turnover: Mapped[float | None] = mapped_column(Float)
+
+    #: How much the metric changed relative to the baseline.
+    sharpe_delta: Mapped[float | None] = mapped_column(Float)
+    fitness_delta: Mapped[float | None] = mapped_column(Float)
+
+    passed: Mapped[bool | None] = mapped_column()
+    message: Mapped[str | None] = mapped_column(Text)
+    tested_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_robustness_candidate_type", "candidate_id", "test_type"),
+    )
+
+
+class ResearchInsight(Base):
+    """One piece of knowledge extracted by the self-learning engine.
+
+    After every ``learning_frequency`` simulations, the engine analyses the batch of
+    results, identifies patterns in winners and losers, and records them here. Each
+    insight is versioned by ``generation`` and typed by ``insight_type``.
+
+    Insights feed back into prompt strategies: winning patterns become examples, failure
+    modes become anti-patterns, and operator/field statistics update the guidance block.
+    The engine can answer "what did it learn?" by reading these rows chronologically.
+    """
+
+    __tablename__ = "research_insight"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_session.id", ondelete="CASCADE"), index=True
+    )
+    generation: Mapped[int | None] = mapped_column(Integer, server_default="0")
+
+    #: What kind of insight: winning_pattern, failure_mode, operator_stat, field_stat,
+    #: strategy_update, prompt_mutation.
+    insight_type: Mapped[str | None] = mapped_column(String(32))
+    #: Human-readable summary of what was learned.
+    summary: Mapped[str | None] = mapped_column(Text)
+    #: Machine-readable rules, e.g. {"operator": "ts_zscore", "avg_sharpe_lift": 0.4}.
+    rules: Mapped[dict[str, Any] | None] = mapped_column(JSON, server_default="{}")
+    #: Supporting evidence: expression snippets, metric ranges, etc.
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, server_default="{}")
+
+    #: Which researcher or prompt produced the batch this insight came from.
+    researcher_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_researcher.id", ondelete="SET NULL")
+    )
+    prompt_strategy_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_strategy.id", ondelete="SET NULL")
+    )
+
+    #: Batch-level statistics at the time of this insight.
+    batch_size: Mapped[int | None] = mapped_column(Integer)
+    batch_avg_sharpe: Mapped[float | None] = mapped_column(Float)
+    batch_best_sharpe: Mapped[float | None] = mapped_column(Float)
+    batch_valid_rate: Mapped[float | None] = mapped_column(Float)
+
+    #: Whether this insight was applied (used to update a prompt) or only recorded.
+    applied: Mapped[bool | None] = mapped_column(default=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_insight_session_gen", "session_id", "generation"),
+    )
+
+
+class LeaderboardSnapshot(Base):
+    """A periodic snapshot of leaderboard rankings.
+
+    Taken after each learning cycle so the dashboard can plot ranking trends over time.
+    The ``dimension`` says what is being ranked (model, prompt, alpha, experiment), and
+    ``entries`` is the ordered list of scored items at that moment.
+
+    Not a live view: the service computes rankings on demand. These rows are the archive
+    that lets a chart show "model X climbed from rank 4 to rank 1 over five generations".
+    """
+
+    __tablename__ = "leaderboard_snapshot"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_session.id", ondelete="CASCADE"), index=True
+    )
+    generation: Mapped[int | None] = mapped_column(Integer)
+
+    #: What is ranked: "model", "prompt", "alpha", "experiment".
+    dimension: Mapped[str | None] = mapped_column(String(32))
+    #: Ordered list of {ref, rank, score, metrics...} dictionaries.
+    entries: Mapped[list[Any] | None] = mapped_column(JSON, server_default="[]")
+
+    snapshot_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=utcnow)
+
+    __table_args__ = (
+        Index("ix_leaderboard_session_dim", "session_id", "dimension"),
+    )
