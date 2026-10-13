@@ -1,5 +1,6 @@
 /** Correlation of the selected Alphas' daily PnL, as a heatmap small enough to take in at once. */
 
+import { toast } from 'sonner'
 import { fmt } from '@/lib/format'
 import type { PortfolioResult } from './api'
 
@@ -93,6 +94,17 @@ export function CorrelationMatrix({ result }: { result: PortfolioResult }) {
   )
   if (!measured.length) return <TopPairs result={result} />
   const range = rangeOf(measured)
+
+  const handleCopyAlphaId = async (alphaId: string, event: React.MouseEvent) => {
+    event.stopPropagation()
+    try {
+      await navigator.clipboard.writeText(alphaId)
+      toast.success('Alpha ID copied')
+    } catch (_e) {
+      toast.error('Failed to copy Alpha ID')
+    }
+  }
+
   return (
     <div className="flex flex-col gap-3">
       <div className="overflow-x-auto">
@@ -112,7 +124,18 @@ export function CorrelationMatrix({ result }: { result: PortfolioResult }) {
                   : value === null
                     ? `${row} · ${column}: under 250 shared days`
                     : `${row} · ${column}: ${fmt.ratio(value)}`
-              return (
+              const isDiagonal = i === j
+              return isDiagonal ? (
+                <button
+                  type="button"
+                  key={`${row}-${column}`}
+                  title={title}
+                  className={`size-3 ${blank} cursor-pointer select-none p-0`}
+                  style={blank || value === null ? undefined : { background: fill(value, range) }}
+                  onClick={(e) => handleCopyAlphaId(row, e)}
+                  aria-label={`Copy Alpha ID: ${row}`}
+                />
+              ) : (
                 <div
                   key={`${row}-${column}`}
                   title={title}
