@@ -4,6 +4,8 @@ Business logic should branch on these, never on raw status codes. The API layer 
 them to HTTP responses in exactly one place.
 """
 
+from __future__ import annotations
+
 from typing import Any
 from urllib.parse import quote, urljoin
 

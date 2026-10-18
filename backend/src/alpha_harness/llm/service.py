@@ -9,6 +9,8 @@ Rotation chooses by remaining daily budget and believes a ``429`` immediately, b
 retry loop that tries each key in turn burns a request from every key on a bad day.
 """
 
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any

@@ -14,7 +14,8 @@ Alpha Harness is an autonomous quantitative alpha discovery and research harness
    - Full automated simulation lifecycle through BRAIN's batch simulation API.
    - Live monitoring of submission status, queue times, and multi-simulation batches.
 
-3. **Rigorous AST Validation & Metrics**
+3. **Rigorous Fast Expression AST Validation & Metrics**
+   - WorldQuant BRAIN Fast Expression (`FASTEXPR`) is the sole supported generation target; Python alpha generation is explicitly out of scope.
    - Abstract Syntax Tree (AST) validation against the BRAIN domain-specific language (DSL).
    - In-Sample (IS) and Out-Of-Sample (OOS) Sharpe ratio calculation and Sharpe decay tracking.
    - Turnover, fitness, margin, returns, and pairwise correlation analysis.

@@ -14,6 +14,8 @@ looks at budget.
 up with the limits their provider shows them; ``limits_url`` is where to look.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 from ..schemas import Out

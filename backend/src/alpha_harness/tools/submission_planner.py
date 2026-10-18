@@ -25,6 +25,8 @@ differ by a tenth or two, so that window cannot rank them. The last fifth report
 choose.
 """
 
+from __future__ import annotations
+
 from bisect import bisect_left
 from datetime import date
 from typing import TYPE_CHECKING, Any
@@ -173,7 +175,8 @@ def search(
     """
     n = rho.shape[0]
     # The diagonal is 1.0, so an Alpha is never legal against itself and cannot be re-picked.
-    under = np.isnan(rho) | (rho < ceiling)
+    # P1-14: Missing or insufficient overlap (rho is NaN) must NOT be inferred as low correlation.
+    under = (~np.isnan(rho)) & (rho < ceiling)
 
     # BRAIN admits a correlated Alpha that beats the one it collides with by 10%
     # (``getting-started-power-pool-alphas.md:20``), and that clause is taken against already
@@ -283,11 +286,73 @@ def worst_pair(
     return value, pair, value >= CEILING and bool({*pair} & set(locked))
 
 
+def evaluate_pairwise_correlation(
+    series_a: dict[date, float],
+    series_b: dict[date, float],
+    *,
+    min_overlap: int = MIN_OVERLAP,
+    ceiling: float = CEILING,
+    holdout_date: date | None = None,
+) -> dict[str, Any]:
+    """Evaluates pairwise PnL Pearson correlation between two alpha return series.
+
+    - Aligns on shared trading days.
+    - Strictly excludes any dates >= holdout_date (P0-03 holdout quarantine).
+    - Requires len(shared_dates) >= min_overlap.
+    - If overlap < min_overlap, explicitly returns status='INSUFFICIENT_OVERLAP' and correlation=None.
+    - If either series has zero variance on shared days, returns status='ZERO_VARIANCE' and correlation=None.
+    - Otherwise calculates Pearson correlation and checks against ceiling.
+    """
+    shared_days = sorted(set(series_a.keys()) & set(series_b.keys()))
+    if holdout_date is not None:
+        shared_days = [d for d in shared_days if d < holdout_date]
+
+    n_overlap = len(shared_days)
+    if n_overlap < min_overlap:
+        return {
+            "status": "INSUFFICIENT_OVERLAP",
+            "correlation": None,
+            "overlap_days": n_overlap,
+            "min_required": min_overlap,
+            "meets_ceiling": False,
+            "reason": f"Shared history ({n_overlap} days) is less than required minimum ({min_overlap} days)",
+        }
+
+    vals_a = np.array([series_a[d] for d in shared_days], dtype=np.float64)
+    vals_b = np.array([series_b[d] for d in shared_days], dtype=np.float64)
+
+    std_a = float(np.std(vals_a))
+    std_b = float(np.std(vals_b))
+
+    if std_a <= 1e-12 or std_b <= 1e-12:
+        return {
+            "status": "ZERO_VARIANCE",
+            "correlation": None,
+            "overlap_days": n_overlap,
+            "min_required": min_overlap,
+            "meets_ceiling": False,
+            "reason": "One or both return series have zero variance on shared dates",
+        }
+
+    cov = float(np.mean((vals_a - np.mean(vals_a)) * (vals_b - np.mean(vals_b))))
+    corr = float(np.clip(cov / (std_a * std_b), -1.0, 1.0))
+
+    return {
+        "status": "OK",
+        "correlation": round(corr, 4),
+        "overlap_days": n_overlap,
+        "min_required": min_overlap,
+        "meets_ceiling": bool(corr < ceiling),
+        "reason": None,
+    }
+
+
 def plan(
     days: dict[str, dict[date, float]],
     alpha_ids: Sequence[str],
     *,
     locked_ids: Sequence[str] = (),
+    holdout_date: date | None = None,
 ) -> dict[str, Any]:
     """The Alphas to submit and the order to submit them in. See this module's docstring.
 
@@ -296,6 +361,13 @@ def plan(
     Alpha on the account, not against the ones this run happened to look at -- so it goes into
     the matrix on its own account.
     """
+    # P0-03 holdout quarantine: if holdout_date is provided, strictly filter out holdout dates
+    if holdout_date is not None:
+        days = {
+            aid: {d: v for d, v in series.items() if d < holdout_date}
+            for aid, series in days.items()
+        }
+
     everything = list(dict.fromkeys([*alpha_ids, *locked_ids]))
     submitted = set(locked_ids)
     kept, dates, full = grid(days, everything)

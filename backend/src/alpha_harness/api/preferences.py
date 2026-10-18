@@ -1,5 +1,7 @@
 """The Settings screen's choices."""
 
+from __future__ import annotations
+
 from fastapi import APIRouter
 
 from .. import preferences

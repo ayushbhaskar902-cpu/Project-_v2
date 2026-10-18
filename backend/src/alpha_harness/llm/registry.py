@@ -11,6 +11,8 @@ providers do not agree on one. Tokens per minute is not tracked at all, because 
 made here would match the provider's.
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -136,7 +138,7 @@ class ModelRegistry:
         model_id = model_id.strip()
         try:
             ZoneInfo(reset_timezone)
-        except ZoneInfoNotFoundError, ValueError:
+        except (ZoneInfoNotFoundError, ValueError):
             raise LLMError(f"{reset_timezone!r} is not a time zone this machine knows.") from None
         if provider not in providers.PROVIDERS:
             raise LLMError(f"{provider!r} is not a provider this application knows.")

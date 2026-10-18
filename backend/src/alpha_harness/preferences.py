@@ -4,6 +4,8 @@ Every choice has a default, so an install that never opens Settings runs as the 
 out of the box.
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field

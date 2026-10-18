@@ -6,6 +6,8 @@ survive a read and a write (``extra="allow"``), and every field a reader used to
 still defaults here. Only what a lab cannot run without is required.
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ConfigDict, Field

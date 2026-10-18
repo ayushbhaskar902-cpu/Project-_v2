@@ -1,5 +1,7 @@
 """Prompt strategy library for alpha research."""
 
+from __future__ import annotations
+
 from .library import (
     BASE_SYSTEM_ROLE,
     FAST_EXPR_RULES,
@@ -7,6 +9,7 @@ from .library import (
     PromptLibrary,
     PromptTemplate,
     StrategyCategory,
+    normalize_category,
 )
 
 __all__ = [
@@ -16,4 +19,5 @@ __all__ = [
     "PromptLibrary",
     "PromptTemplate",
     "StrategyCategory",
+    "normalize_category",
 ]

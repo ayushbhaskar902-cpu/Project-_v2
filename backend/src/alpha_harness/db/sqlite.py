@@ -14,6 +14,10 @@ with no default: nothing writes that one, so it blocks every insert into its tab
 is dropped because nothing reads it either.
 """
 
+from __future__ import annotations
+
+from datetime import UTC, datetime
+import json
 import re
 import sqlite3
 from contextlib import asynccontextmanager, closing
@@ -169,6 +173,269 @@ async def migrate(connection: AsyncConnection) -> None:
 
         added_indexes.extend(
             [index.name or "" for index in table.indexes if await _create_index(connection, index)]
+        )
+
+    # P0-04: Non-destructive migration marking legacy synthetic robustness records
+    # Legacy records lack genuine brain_simulation_id and were produced by random.uniform
+    if "research_robustness" in live_tables:
+        await connection.execute(
+            text(
+                "UPDATE research_robustness "
+                "SET is_synthetic = 1, result_kind = 'LEGACY_SYNTHETIC' "
+                "WHERE (brain_simulation_id IS NULL OR brain_simulation_id = '') "
+                "AND (result_kind = 'GENUINE' OR result_kind IS NULL)"
+            )
+        )
+
+    # P1-01: Non-destructive migration marking legacy heuristic research insights
+    if "research_insight" in live_tables:
+        await connection.execute(
+            text(
+                "UPDATE research_insight "
+                "SET execution_status = 'LEGACY_HEURISTIC', is_fallback = 1 "
+                "WHERE execution_status IS NULL OR execution_status = ''"
+            )
+        )
+
+    # P1-02: Non-destructive legacy category normalization and active deduplication
+    if "prompt_strategy" in live_tables:
+        await connection.execute(
+            text(
+                "UPDATE prompt_strategy "
+                "SET category = lower(trim(category)) "
+                "WHERE category IS NOT NULL AND category != lower(trim(category))"
+            )
+        )
+        # Normalize explicitly supported canonical aliases (e.g. mean-reversion -> mean_reversion)
+        # while preserving distinct categories (e.g. reversal) and custom identities
+        await connection.execute(
+            text(
+                "UPDATE prompt_strategy "
+                "SET category = 'mean_reversion' "
+                "WHERE category IN ('mean-reversion', 'mean reversion', 'meanreversion')"
+            )
+        )
+        # Deactivate duplicate active session-specific strategies, retaining highest (version DESC, id DESC)
+        await connection.execute(
+            text(
+                """
+                UPDATE prompt_strategy
+                SET is_active = 0
+                WHERE is_active = 1 AND session_id IS NOT NULL AND id NOT IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY session_id, category
+                                   ORDER BY version DESC, id DESC
+                               ) as rn
+                        FROM prompt_strategy
+                        WHERE is_active = 1 AND session_id IS NOT NULL
+                    ) WHERE rn = 1
+                )
+                """
+            )
+        )
+        # Deactivate duplicate active global strategies (session_id IS NULL), retaining highest (version DESC, id DESC)
+        await connection.execute(
+            text(
+                """
+                UPDATE prompt_strategy
+                SET is_active = 0
+                WHERE is_active = 1 AND session_id IS NULL AND id NOT IN (
+                    SELECT id FROM (
+                        SELECT id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY category
+                                   ORDER BY version DESC, id DESC
+                               ) as rn
+                        FROM prompt_strategy
+                        WHERE is_active = 1 AND session_id IS NULL
+                    ) WHERE rn = 1
+                )
+                """
+            )
+        )
+
+    if "research_researcher" in live_tables:
+        await connection.execute(
+            text(
+                "UPDATE research_researcher "
+                "SET strategy_focus = lower(trim(strategy_focus)) "
+                "WHERE strategy_focus IS NOT NULL AND strategy_focus != lower(trim(strategy_focus))"
+            )
+        )
+        await connection.execute(
+            text(
+                "UPDATE research_researcher "
+                "SET strategy_focus = 'mean_reversion' "
+                "WHERE strategy_focus IN ('mean-reversion', 'mean reversion', 'meanreversion')"
+            )
+        )
+
+    # Refresh live tables after create_all to capture newly created tables
+    current_tables = set(await connection.run_sync(_table_names))
+
+    # P1-03: Immutable prompt version triggers, partial unique indexes, and canonical seed versions
+    if "prompt_version" in current_tables:
+        # 1. Database-enforced immutability triggers (reject UPDATE and DELETE)
+        await connection.execute(
+            text(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_prompt_version_no_update
+                BEFORE UPDATE ON prompt_version
+                BEGIN
+                    SELECT RAISE(ABORT, 'PromptVersion records are immutable: UPDATE operations are strictly prohibited');
+                END;
+                """
+            )
+        )
+        await connection.execute(
+            text(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_prompt_version_no_delete
+                BEFORE DELETE ON prompt_version
+                BEGIN
+                    SELECT RAISE(ABORT, 'PromptVersion records are immutable: DELETE operations are strictly prohibited');
+                END;
+                """
+            )
+        )
+
+        # 2. Database-enforced partial unique indexes for version identity
+        # A. Strategy-associated versions: unique per (origin_strategy_id, version)
+        await connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_prompt_version_strategy_ver
+                ON prompt_version(origin_strategy_id, version)
+                WHERE origin_strategy_id IS NOT NULL;
+                """
+            )
+        )
+        # B. Session-standalone versions (no strategy row): unique per (origin_session_id, category, version)
+        await connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_prompt_version_session_cat_ver
+                ON prompt_version(origin_session_id, category, version)
+                WHERE origin_session_id IS NOT NULL AND origin_strategy_id IS NULL;
+                """
+            )
+        )
+        # C. Global baseline versions (no session, no strategy): unique per (category, version)
+        await connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_prompt_version_global_cat_ver
+                ON prompt_version(category, version)
+                WHERE origin_session_id IS NULL AND origin_strategy_id IS NULL;
+                """
+            )
+        )
+
+        # 3. Canonical seed PromptVersion creation and global strategy linkage
+        from ..prompts.library import SEED_TEMPLATES, normalize_category
+        from ..prompts.versioning import compute_prompt_content_hash, normalize_prompt_components
+
+        for cat_enum, tmpl in SEED_TEMPLATES.items():
+            cat_norm = normalize_category(cat_enum)
+            res = await connection.execute(
+                text(
+                    """
+                    SELECT id FROM prompt_version
+                    WHERE origin_session_id IS NULL
+                      AND origin_strategy_id IS NULL
+                      AND category = :cat
+                      AND version = 1
+                    LIMIT 1
+                    """
+                ),
+                {"cat": cat_norm},
+            )
+            seed_row = res.fetchone()
+            if seed_row:
+                seed_pv_id = seed_row[0]
+            else:
+                t_text, n_guidance, n_examples, n_anti_patterns = normalize_prompt_components(
+                    template_text=tmpl.template_text,
+                    guidance={
+                        "strategy": tmpl.strategy_guidance,
+                        "operators": tmpl.operator_guidance,
+                    },
+                    examples=tmpl.default_examples,
+                    anti_patterns=tmpl.anti_patterns,
+                )
+                c_hash = compute_prompt_content_hash(
+                    template_text=t_text,
+                    guidance=n_guidance,
+                    examples=n_examples,
+                    anti_patterns=n_anti_patterns,
+                )
+                now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+                import json
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO prompt_version (
+                            origin_session_id, origin_strategy_id, category, version,
+                            authoring_source, template_text, guidance, examples,
+                            anti_patterns, content_hash, parent_version_id, created_at
+                        ) VALUES (
+                            NULL, NULL, :category, 1, 'SEED', :template_text, :guidance,
+                            :examples, :anti_patterns, :content_hash, NULL, :created_at
+                        )
+                        """
+                    ),
+                    {
+                        "category": cat_norm,
+                        "template_text": t_text,
+                        "guidance": n_guidance,
+                        "examples": json.dumps(n_examples),
+                        "anti_patterns": json.dumps(n_anti_patterns),
+                        "content_hash": c_hash,
+                        "created_at": now_str,
+                    },
+                )
+                res_inserted = await connection.execute(
+                    text("SELECT last_insert_rowid()")
+                )
+                seed_pv_id = res_inserted.scalar()
+
+            # Link active global prompt_strategy rows if currently unversioned
+            if "prompt_strategy" in current_tables and seed_pv_id:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE prompt_strategy
+                        SET current_prompt_version_id = :pv_id
+                        WHERE session_id IS NULL
+                          AND category = :cat
+                          AND (current_prompt_version_id IS NULL OR current_prompt_version_id = '')
+                        """
+                    ),
+                    {"pv_id": seed_pv_id, "cat": cat_norm},
+                )
+
+    # P1-04: Non-destructive migration marking legacy generation attempts and candidates
+    if "generation_attempt" in current_tables:
+        await connection.execute(
+            text(
+                """
+                UPDATE generation_attempt
+                SET dataset_selection_policy = 'LEGACY_UNSPECIFIED'
+                WHERE dataset_selection_policy IS NULL
+                """
+            )
+        )
+    if "research_candidate" in current_tables:
+        await connection.execute(
+            text(
+                """
+                UPDATE research_candidate
+                SET dataset_selection_policy = 'LEGACY_UNSPECIFIED'
+                WHERE dataset_selection_policy IS NULL
+                """
+            )
         )
 
     if added_columns or added_indexes or retired_columns:

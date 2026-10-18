@@ -5,6 +5,8 @@ runs until its simulations are spent, across days if it has to, and can be pause
 stopped, changed or removed. Search Lab, Template Lab and Evolution Lab add scheduler.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import itertools

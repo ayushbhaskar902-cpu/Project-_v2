@@ -12,6 +12,8 @@ Every selection caps each Alpha's operators at 8,000 / limit: BRAIN warns rather
 fails past 8,000 operators in all, and drops what does not fit.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 

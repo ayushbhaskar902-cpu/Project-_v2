@@ -5,6 +5,8 @@ catalog sync progress — so the UI opens a single socket rather than polling se
 endpoints. Commands still go over REST; this is strictly server to client.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import json

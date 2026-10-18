@@ -10,6 +10,8 @@ delay fragments into small batches while one varying universe and expression pac
 perfectly. Pure by design — no database, no HTTP.
 """
 
+from __future__ import annotations
+
 import itertools
 from collections import defaultdict
 from dataclasses import dataclass
@@ -107,13 +109,16 @@ class Batch:
 
 def key_of(payload: dict[str, Any]) -> BatchKey:
     """Derive the batch key from a simulation request body."""
+    from ..generator.pipeline import validate_alpha_language
+
     settings = payload.get("settings") or {}
+    lang = validate_alpha_language(settings.get("language", "FASTEXPR"))
     return BatchKey(
         sim_type=str(payload.get("type", "REGULAR")),
         instrument_type=str(settings.get("instrumentType", "EQUITY")),
         region=str(settings.get("region", "")),
         delay=int(settings.get("delay", 1)),
-        language=str(settings.get("language", "FASTEXPR")),
+        language=lang,
         mode=str(settings.get("simulationMode") or FULL_MODE),
     )
 

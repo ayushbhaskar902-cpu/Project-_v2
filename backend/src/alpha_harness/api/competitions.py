@@ -4,6 +4,8 @@ BRAIN lists every competition with your status in it, but your rank only comes w
 competition at a time, so only the ongoing ones are read in full.
 """
 
+from __future__ import annotations
+
 import asyncio
 from datetime import UTC, datetime
 from typing import Any

@@ -1,5 +1,7 @@
 """Multi-LLM researcher orchestration module."""
 
+from __future__ import annotations
+
 from .researchers import (
     DEFAULT_RESEARCHER_ROSTER,
     ITEMS_PER_CORE,

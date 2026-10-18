@@ -5,6 +5,8 @@ tracker, the sync engine — and wires them together. Routers reach it through a
 dependency, so nothing constructs its own connections and shutdown is deterministic.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import time
@@ -23,7 +25,7 @@ from .catalog.queries import CatalogQueries
 from .catalog.sync import CatalogSync, serialise_run
 from .config import BRAIN_API_BASE, Settings
 from .db.duck import Catalog
-from .db.models import SimStatus, SimulationRecord, utcnow
+from .db.models import ResearchSession, ResearchStatus, SimStatus, SimulationRecord, utcnow
 from .db.sqlite import Database, snapshot
 from .engine.slots import BatchEngine
 from .engine.tracker import SimulationTracker
@@ -126,16 +128,27 @@ class AppState:
         from .portfolio import AlphaPoolOptimizer
         from .prompts import PromptLibrary
 
-        self.discovery = CatalogDiscovery(self.catalog)
+        self.discovery = CatalogDiscovery(self.catalog, metadata=self.metadata)
         self.prompt_library = PromptLibrary()
-        self.pipeline = AlphaGenerationPipeline(self.llm, self.prompt_library, self.discovery)
+        self.pipeline = AlphaGenerationPipeline(self.llm, self.prompt_library, self.discovery, metadata=self.metadata)
         self.orchestrator = MultiLLMOrchestrator(self.db, self.pipeline)
-        self.evaluation = EvaluationEngine(self.db)
-        self.robustness = RobustnessEngine(self.db)
+        self.evaluation = EvaluationEngine(self.db, self.alphas)
+        self.robustness = RobustnessEngine(
+            self.db,
+            vault=self.alphas,
+            endpoints=self.endpoints,
+            tracker=self.tracker,
+            engine=self.engine,
+            auth=self.auth,
+        )
         self.memory = ResearchMemory(self.db)
         self.learning = SelfLearningEngine(self.db, self.memory, self.llm)
         self.leaderboard = LeaderboardService(self.db)
         self.pool_optimizer = AlphaPoolOptimizer(self.db)
+
+        # P0-05: Autonomous experiment lifecycle
+        from .experiment import ExperimentRegistry
+        self.experiments = ExperimentRegistry()
 
         self._renew_lock = asyncio.Lock()
         self._last_session_check = float("-inf")
@@ -149,6 +162,10 @@ class AppState:
         await self.catalog.open()
         await asyncio.to_thread(snapshot, self.settings.sqlite_path, updates.current())
         await self.db.create_all()
+        try:
+            await self.evaluation.backfill_legacy_holdout_contamination()
+        except Exception:
+            log.warning("startup.backfill_legacy_holdout_failed", exc_info=True)
         preferences.apply(self, await preferences.load(self.db))
         await self.models.load()
         # A catalog downloaded before the search index existed still has none; building it
@@ -190,6 +207,11 @@ class AppState:
         await self.tracker.start()
         await self.engine.start()
         await self.optimizer.start()
+        # P0-05: Resume any experiment sessions that were running when the process stopped.
+        try:
+            await self._resume_experiments()
+        except Exception:
+            log.warning("startup.experiment_resume_failed", exc_info=True)
         self._session_watch = asyncio.create_task(self._watch_session(), name="session-watch")
         log.info("startup.complete", data_dir=str(self.settings.data_dir))
 
@@ -293,6 +315,8 @@ class AppState:
             watch.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watch
+        # P0-05: Stop all running experiments before other services.
+        await self.experiments.stop_all()
         await self.optimizer.stop()
         await self.engine.stop()
         await self.tracker.stop()
@@ -305,3 +329,44 @@ class AppState:
         await self.catalog.close()
         await self.db.dispose()
         log.info("shutdown.complete")
+
+    async def _resume_experiments(self) -> None:
+        """Resume experiment sessions that were active when the process last stopped.
+
+        Any session in a RUNNING, GENERATING, SIMULATING, EVALUATING, or LEARNING phase
+        is assumed to have been interrupted by a restart and is resumed.
+        """
+        from .experiment import ExperimentRunner
+
+        active_phases = {
+            ResearchStatus.RUNNING,
+            ResearchStatus.GENERATING,
+            ResearchStatus.SIMULATING,
+            ResearchStatus.EVALUATING,
+            ResearchStatus.LEARNING,
+        }
+        async with self.db.session() as session:
+            stmt = select(ResearchSession).where(
+                ResearchSession.status.in_([s.value for s in active_phases])
+            )
+            result = await session.execute(stmt)
+            sessions = list(result.scalars().all())
+
+        for sess in sessions:
+            runner = ExperimentRunner(
+                session_id=sess.id,
+                db=self.db,
+                orchestrator=self.orchestrator,
+                evaluation=self.evaluation,
+                learning=self.learning,
+                leaderboard=self.leaderboard,
+                engine=self.engine,
+                on_phase_change=lambda data: self.hub.broadcast(TOPIC_SESSION, data),
+            )
+            self.experiments.register(runner)
+            try:
+                await runner.resume()
+                log.info("startup.experiment_resumed", session_id=sess.id, phase=sess.status)
+            except Exception:
+                log.warning("startup.experiment_resume_one_failed",
+                            session_id=sess.id, exc_info=True)

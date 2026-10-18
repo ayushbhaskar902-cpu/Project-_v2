@@ -10,6 +10,8 @@ Firefox, Safari, a browser that cannot be found — gets a tab, exactly as befor
 Standard library only: the launcher keeps a copy of this, and must run with no venv at all.
 """
 
+from __future__ import annotations
+
 import os
 import plistlib
 import re
@@ -88,7 +90,7 @@ def _app_command(url: str) -> list[str] | None:
         if sys.platform == "darwin":
             return _mac(url)
         return _linux(url)
-    except OSError, ValueError, subprocess.SubprocessError, plistlib.InvalidFileException:
+    except (OSError, ValueError, subprocess.SubprocessError, plistlib.InvalidFileException):
         return None
 
 
@@ -151,7 +153,7 @@ def _linux(url: str) -> list[str] | None:
             done = subprocess.run(  # noqa: S603 - a desktop's own tools, fixed arguments
                 asked, capture_output=True, text=True, timeout=3, check=False
             )
-        except OSError, subprocess.SubprocessError:
+        except (OSError, subprocess.SubprocessError):
             continue
         if done.returncode == 0 and (desktop := done.stdout.strip().lower()):
             break

@@ -6,6 +6,8 @@ BRAIN counts them), given a random universe, neutralization and decay, and kept 
 waiting trial until cores are free. Calls never happen inside ``advance``.
 """
 
+from __future__ import annotations
+
 import json
 import random
 import time
@@ -585,7 +587,7 @@ def parse_alphas(text: str) -> list[dict[str, Any]]:
     for candidate in (text, *(m.group(1) for m in FENCE.finditer(text))):
         try:
             payload = json.loads(candidate)
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             continue
         if isinstance(payload, dict) and isinstance(payload.get("alphas"), list):
             return [a for a in payload["alphas"] if isinstance(a, dict) and a.get("expression")]

@@ -13,16 +13,103 @@ import {
   BrainIcon,
   CheckCircle2Icon,
   CpuIcon,
+  DatabaseIcon,
+  GlobeIcon,
   LayersIcon,
   LightbulbIcon,
   PlayIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  SlidersHorizontalIcon,
   SparklesIcon,
   TrophyIcon,
   XCircleIcon,
+  XIcon,
 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { Badge, Button, Page, PageHeader, Panel } from '@/ui/kit'
+
+const REGION_UNIVERSES: Record<string, string[]> = {
+  USA: ['TOP3000', 'TOP1000', 'TOP500', 'MINVOL1M'],
+  EUR: ['TOP2500', 'TOP1200', 'STOXX600'],
+  ASI: ['TOP1000', 'TOP500', 'MINVOL1M'],
+  CHN: ['TOP3000', 'TOP1000', 'TOP500'],
+  GLB: ['TOP3000', 'TOP1000'],
+}
+
+const CAMPAIGN_PRESETS = [
+  {
+    name: 'US Fundamental Quality & Cash Flow',
+    prompt: 'Discover profitable alphas leveraging cash flow yield, ROIC quality, and balance sheet strength.',
+    region: 'USA',
+    universe: 'TOP3000',
+    delay: 1,
+    neutralization: 'INDUSTRY',
+    decay: 4,
+  },
+  {
+    name: 'US Analyst Revision & Momentum',
+    prompt: 'Exploit consensus EPS revisions, price target upgrades, and residual momentum anomalies.',
+    region: 'USA',
+    universe: 'TOP1000',
+    delay: 1,
+    neutralization: 'INDUSTRY',
+    decay: 4,
+  },
+  {
+    name: 'European Quality & Dividend Yield',
+    prompt: 'Target high-payout, low-leverage European equities with stable EBITDA and earnings yield.',
+    region: 'EUR',
+    universe: 'TOP1200',
+    delay: 1,
+    neutralization: 'SECTOR',
+    decay: 4,
+  },
+  {
+    name: 'Asian Liquidity & Retail Reversion',
+    prompt: 'Capture retail order flow shocks, turnover velocity extremes, and mean reversion in Asian markets.',
+    region: 'ASI',
+    universe: 'TOP1000',
+    delay: 1,
+    neutralization: 'INDUSTRY',
+    decay: 2,
+  },
+  {
+    name: 'China A-Share Momentum & Margin Flow',
+    prompt: 'Capitalize on margin financing balance changes, turnover spikes, and price momentum in China A-shares.',
+    region: 'CHN',
+    universe: 'TOP1000',
+    delay: 1,
+    neutralization: 'SUBINDUSTRY',
+    decay: 4,
+  },
+  {
+    name: 'Global Cross-Border Value',
+    prompt: 'Normalize enterprise multiple and book yield across global equities with country risk neutralization.',
+    region: 'GLB',
+    universe: 'TOP3000',
+    delay: 1,
+    neutralization: 'MARKET',
+    decay: 6,
+  },
+]
+
+const DATASET_CATEGORIES = [
+  { id: 'fundamental', label: 'Fundamental & Accounting' },
+  { id: 'analyst', label: 'Analyst Estimates & Consensus' },
+  { id: 'sentiment', label: 'News & Social Media Sentiment' },
+  { id: 'short_interest', label: 'Short Interest & Borrow Fees' },
+  { id: 'price_volume', label: 'Price / Volume & Liquidity' },
+  { id: 'risk_factors', label: 'Style & Risk Factors (Barra)' },
+]
+
+const MODEL_OPTIONS = [
+  { ref: 'google:gemini-2.5-pro', label: 'Gemini 2.5 Pro (Momentum)', desc: 'Macro trends, multi-period momentum' },
+  { ref: 'google:gemini-2.5-flash', label: 'Gemini 2.5 Flash (Reversion)', desc: 'Fast statistical reversion & micro-signals' },
+  { ref: 'openai:gpt-4o', label: 'GPT-4o (Fundamental Value)', desc: 'Financial ratio decomposition & cash flows' },
+  { ref: 'deepseek:deepseek-chat', label: 'DeepSeek Chat (Multi-Factor)', desc: 'Nonlinear multi-factor interactions' },
+]
 
 interface SessionSummary {
   id: number
@@ -154,6 +241,34 @@ export function ResearchStudioScreen() {
   const [maxCorr, setMaxCorr] = useState(0.6)
   const [targetPoolSize, setTargetPoolSize] = useState(50)
 
+  // New Campaign Modal State
+  const [isNewCampaignOpen, setIsNewCampaignOpen] = useState(false)
+  const [newName, setNewName] = useState('US Fundamental Quality')
+  const [newPrompt, setNewPrompt] = useState(
+    'Discover profitable cross-sectional equity alphas combining valuation, cash flow, and momentum.',
+  )
+  const [newRegion, setNewRegion] = useState('USA')
+  const [newUniverse, setNewUniverse] = useState('TOP3000')
+  const [newDelay, setNewDelay] = useState(1)
+  const [newNeutralization, setNewNeutralization] = useState('INDUSTRY')
+  const [newDecay, setNewDecay] = useState(4)
+  const [newSelectedModels, setNewSelectedModels] = useState<string[]>([
+    'google:gemini-2.5-pro',
+    'google:gemini-2.5-flash',
+    'openai:gpt-4o',
+    'deepseek:deepseek-chat',
+  ])
+  const [newSelectedCategories, setNewSelectedCategories] = useState<string[]>([
+    'fundamental',
+    'analyst',
+    'sentiment',
+    'price_volume',
+  ])
+  const [isCreatingCampaign, setIsCreatingCampaign] = useState(false)
+
+  // Simulation status & auto-polling
+  const [pendingSimCount, setPendingSimCount] = useState<number | null>(null)
+
   // Fetch sessions on load
   const loadSessions = useCallback(async () => {
     try {
@@ -273,10 +388,12 @@ export function ResearchStudioScreen() {
       if (res.ok) {
         const data = await res.json()
         if (data.status === 'pending_simulations') {
+          setPendingSimCount(data.pendingSimulations)
           toast.info('Simulations Dispatched to BRAIN', {
-            description: data.message || `${data.pendingSimulations} simulations running on WorldQuant BRAIN.`,
+            description: `${data.pendingSimulations} simulations running on WorldQuant BRAIN. Auto-polling results...`,
           })
         } else if (data.evaluatedCount > 0) {
+          setPendingSimCount(null)
           toast.success(
             `BRAIN Backtest Evaluation Complete: ${data.evaluatedCount} alphas (${data.submissionGradeCount} submissible)`,
           )
@@ -295,6 +412,97 @@ export function ResearchStudioScreen() {
       toast.error('Simulation error', { description: String(err) })
     } finally {
       setIsSimulating(false)
+    }
+  }
+
+  // Auto-polling when simulations are pending on WorldQuant BRAIN
+  useEffect(() => {
+    if (pendingSimCount === null || pendingSimCount <= 0 || !selectedSessionId) return
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/research/sessions/${selectedSessionId}/evaluate`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'sec-fetch-site': 'same-origin',
+            'x-harness-client': '1',
+          },
+          body: JSON.stringify({ cost_bps: 1.5 }),
+        })
+        if (res.ok) {
+          const d = await res.json()
+          if (d.status === 'pending_simulations') {
+            setPendingSimCount(d.pendingSimulations)
+          } else if (d.evaluatedCount > 0) {
+            setPendingSimCount(null)
+            toast.success(
+              `BRAIN Backtest Finished: ${d.evaluatedCount} alphas evaluated (${d.submissionGradeCount} submissible)`,
+            )
+            await loadSessionData(selectedSessionId)
+            await loadSessions()
+          }
+        }
+      } catch (err) {
+        console.error('Auto-poll error:', err)
+      }
+    }, 10000)
+
+    return () => clearInterval(interval)
+  }, [pendingSimCount, selectedSessionId, loadSessionData, loadSessions])
+
+  const handleCreateCampaign = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!newName.trim()) {
+      toast.error('Campaign name is required')
+      return
+    }
+    if (newSelectedModels.length === 0) {
+      toast.error('Please select at least one researcher model')
+      return
+    }
+
+    setIsCreatingCampaign(true)
+    try {
+      const res = await fetch('/api/research/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'sec-fetch-site': 'same-origin',
+          'x-harness-client': '1',
+        },
+        body: JSON.stringify({
+          name: newName.trim(),
+          prompt: newPrompt.trim(),
+          instrument_type: 'EQUITY',
+          region: newRegion,
+          universe: newUniverse,
+          delay: Number(newDelay),
+          simulation_budget: 500,
+          learning_frequency: 80,
+          model_refs: newSelectedModels,
+          constraints: {
+            neutralization: newNeutralization,
+            decay: Number(newDecay),
+            dataset_categories: newSelectedCategories,
+          },
+        }),
+      })
+
+      if (res.ok) {
+        const created = await res.json()
+        toast.success(`Campaign created: ${created.name} (${newRegion}/${newUniverse})`)
+        setIsNewCampaignOpen(false)
+        await loadSessions()
+        setSelectedSessionId(created.id)
+      } else {
+        const err = await res.json().catch(() => ({ detail: 'Failed to create campaign' }))
+        toast.error('Failed to create campaign', { description: String(err.detail || 'Server error') })
+      }
+    } catch (err) {
+      toast.error('Campaign creation error', { description: String(err) })
+    } finally {
+      setIsCreatingCampaign(false)
     }
   }
 
@@ -377,6 +585,14 @@ export function ResearchStudioScreen() {
         description="Autonomous quantitative research laboratory. Heterogeneous LLM researcher agents collaborate, generate AST-validated Fast Expressions, evaluate 10-year simulation metrics, and self-learn optimal alpha strategies."
         actions={
           <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => setIsNewCampaignOpen(true)}
+              className="border-primary/40 text-primary hover:border-primary"
+            >
+              <PlusIcon className="mr-1.5 h-3.5 w-3.5" />
+              New Campaign
+            </Button>
             {sessions.length > 0 && (
               <select
                 value={selectedSessionId ?? ''}
@@ -385,7 +601,7 @@ export function ResearchStudioScreen() {
               >
                 {sessions.map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.name} (Gen {s.currentGeneration})
+                    {s.name} ({s.region}/{s.universe} G{s.currentGeneration})
                   </option>
                 ))}
               </select>
@@ -417,6 +633,31 @@ export function ResearchStudioScreen() {
           </div>
         }
       />
+
+      {/* Simulation Polling Status Banner */}
+      {pendingSimCount !== null && pendingSimCount > 0 && (
+        <div className="mb-4 flex items-center justify-between rounded-lg border border-status-running/40 bg-status-running/10 px-4 py-3 text-caption text-ink">
+          <div className="flex items-center gap-3">
+            <RefreshCwIcon className="h-4 w-4 animate-spin text-status-running" />
+            <div>
+              <span className="font-semibold text-ink">
+                {pendingSimCount} alpha simulations currently in flight on WorldQuant BRAIN.
+              </span>
+              <span className="ml-2 text-ink-subtle">
+                Multi-sim batches take ~1–2 minutes. Auto-polling results every 10s...
+              </span>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={isSimulating}
+            onClick={handleSimulateCandidates}
+          >
+            Check Now
+          </Button>
+        </div>
+      )}
 
       {/* Campaign Overview Banner */}
       {currentSession && (

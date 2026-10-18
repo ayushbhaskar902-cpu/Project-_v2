@@ -4,6 +4,8 @@ A task waits in Tasks for free cores and may use more than one day's allowance b
 is done.
 """
 
+from __future__ import annotations
+
 from typing import Any
 
 from fastapi import APIRouter

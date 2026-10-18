@@ -10,6 +10,8 @@ scope in one response. Datasets are paged; categories are one request and do not
 on the scope.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import json
@@ -313,7 +315,7 @@ class CatalogSync:
                 # One dataset BRAIN will not page to the end must not discard the hundred
                 # already downloaded: a bare gather cancels its siblings on the first raised
                 # exception, throwing away ten minutes of requests. Cancellation still does.
-                except SyncCancelled, CatalogUnusableError:
+                except (SyncCancelled, CatalogUnusableError):
                     raise
                 except Exception as exc:  # noqa: BLE001 - named in the run's own report
                     lost.append(f"{dataset_id}: {_reason(exc)}")
@@ -404,7 +406,7 @@ class CatalogSync:
 
                 try:
                     fields, datasets, categories = await _retry(store, cancel, target.label)
-                except SyncCancelled, CatalogUnusableError:
+                except (SyncCancelled, CatalogUnusableError):
                     # An unusable catalog fails every remaining market the same way.
                     raise
                 # One market failing must not end the whole sync.
@@ -461,7 +463,7 @@ class CatalogSync:
                 async with gate:
                     await _retry(details, cancel, target.label)
                 market["state"] = "done"
-            except SyncCancelled, CatalogUnusableError:
+            except (SyncCancelled, CatalogUnusableError):
                 raise
             # The market stays browsable on its derived rows.
             except Exception as exc:  # noqa: BLE001

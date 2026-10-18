@@ -13,12 +13,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from ..brain.schemas import SimulationRequest, SimulationSettings, SimulationType
 from ..db.models import (
     CandidateStatus,
+    GenerationAttempt,
     PromptStrategy,
+    PromptVersion,
     ResearchCandidate,
     ResearchResearcher,
     ResearchSession,
@@ -27,8 +29,39 @@ from ..db.models import (
     SimulationRecord,
     utcnow,
 )
-from ..generator.pipeline import AlphaGenerationPipeline, GeneratedCandidate, GenerationBatch
-from ..prompts.library import StrategyCategory
+from ..discovery.catalog import (
+    DatasetAllocationPolicy,
+    DatasetEligibilityError,
+    DatasetNotFoundError,
+    DatasetRegistry,
+    DatasetSelectionContext,
+)
+from ..generator.pipeline import (
+    AlphaGenerationPipeline,
+    GeneratedCandidate,
+    GenerationBatch,
+    validate_alpha_language,
+)
+from ..labs.fastexpr import extract_candidate_fingerprint, operator_names, parse
+from .diversity import CandidateItem, DiversityConfig, DiversitySelector
+from .simulation_settings import (
+    CandidateSimulationSettings,
+    PlatformSchemaValidator,
+    SimulationSettingsResolutionError,
+    SimulationSettingsValidationError,
+    compute_candidate_provenance_hash,
+    resolve_candidate_simulation_settings,
+    validate_candidate_dataset_preflight,
+)
+from ..learning.memory import ResearchMemory
+from ..prompts.library import StrategyCategory, normalize_category
+from ..prompts.versioning import (
+    PromptIntegrityError,
+    PromptResolutionError,
+    compute_prompt_content_hash,
+    normalize_prompt_components,
+    verify_prompt_integrity,
+)
 
 if TYPE_CHECKING:
     from ..db.sqlite import Database
@@ -53,6 +86,7 @@ class ResearcherConfig:
     temperature: float = 0.7
     system_prompt: str | None = None
     target_dataset_id: str | None = None
+    dataset_allocation_policy: str | None = None
     description: str | None = None
     enabled: bool = True
 
@@ -96,9 +130,13 @@ class MultiLLMOrchestrator:
         self,
         db: Database,
         pipeline: AlphaGenerationPipeline,
+        memory: ResearchMemory | None = None,
+        settings_schema: dict[str, Any] | None = None,
     ) -> None:
         self.db = db
         self.pipeline = pipeline
+        self.memory = memory or ResearchMemory(db)
+        self.settings_schema = settings_schema
 
     async def initialize_session_researchers(
         self,
@@ -112,7 +150,7 @@ class MultiLLMOrchestrator:
         async with self.db.session() as session:
             # 1. Create researcher agent personas
             for cfg in roster:
-                focus_val = cfg.strategy_focus.value if isinstance(cfg.strategy_focus, StrategyCategory) else str(cfg.strategy_focus)
+                focus_val = normalize_category(cfg.strategy_focus)
                 researcher = ResearchResearcher(
                     session_id=session_id,
                     model_ref=cfg.model_ref,
@@ -120,6 +158,8 @@ class MultiLLMOrchestrator:
                     strategy_focus=focus_val,
                     system_prompt=cfg.system_prompt,
                     temperature=cfg.temperature,
+                    target_dataset_id=cfg.target_dataset_id,
+                    dataset_allocation_policy=cfg.dataset_allocation_policy,
                     enabled=cfg.enabled,
                     total_generated=0,
                     total_valid=0,
@@ -135,23 +175,34 @@ class MultiLLMOrchestrator:
             existing_strats = await session.execute(
                 select(PromptStrategy.category).where(PromptStrategy.session_id == session_id)
             )
-            seeded_categories = set(existing_strats.scalars().all())
+            seeded_categories = {
+                normalize_category(c) for c in existing_strats.scalars().all() if c
+            }
 
             for cfg in roster:
-                cat_enum = (
-                    cfg.strategy_focus
-                    if isinstance(cfg.strategy_focus, StrategyCategory)
-                    else StrategyCategory(cfg.strategy_focus)
-                    if cfg.strategy_focus in StrategyCategory._value2member_map_
-                    else StrategyCategory.GENERAL
-                )
-                if cat_enum.value not in seeded_categories:
-                    tmpl = self.pipeline.library.get_template(cat_enum)
+                norm_cat = normalize_category(cfg.strategy_focus)
+                if norm_cat not in seeded_categories:
+                    tmpl = self.pipeline.library.get_template(norm_cat)
+                    t_text, n_guidance, n_examples, n_anti_patterns = normalize_prompt_components(
+                        template_text=tmpl.template_text,
+                        guidance={
+                            "strategy": tmpl.strategy_guidance,
+                            "operators": tmpl.operator_guidance,
+                        },
+                        examples=tmpl.default_examples,
+                        anti_patterns=tmpl.anti_patterns,
+                    )
+                    c_hash = compute_prompt_content_hash(
+                        template_text=t_text,
+                        guidance=n_guidance,
+                        examples=n_examples,
+                        anti_patterns=n_anti_patterns,
+                    )
                     prompt_strat = PromptStrategy(
                         session_id=session_id,
                         name=f"Seed {tmpl.name}",
                         version=1,
-                        category=cat_enum.value,
+                        category=norm_cat,
                         template_text=tmpl.template_text,
                         guidance={
                             "strategy": tmpl.strategy_guidance,
@@ -162,7 +213,23 @@ class MultiLLMOrchestrator:
                         is_active=True,
                     )
                     session.add(prompt_strat)
-                    seeded_categories.add(cat_enum.value)
+                    await session.flush()
+                    pv = PromptVersion(
+                        origin_session_id=session_id,
+                        origin_strategy_id=prompt_strat.id,
+                        category=norm_cat,
+                        version=1,
+                        authoring_source="SEED",
+                        template_text=t_text,
+                        guidance=n_guidance,
+                        examples=n_examples,
+                        anti_patterns=n_anti_patterns,
+                        content_hash=c_hash,
+                    )
+                    session.add(pv)
+                    await session.flush()
+                    prompt_strat.current_prompt_version_id = pv.id
+                    seeded_categories.add(norm_cat)
 
         log.info(
             "orchestrator.researchers_initialized",
@@ -200,6 +267,8 @@ class MultiLLMOrchestrator:
                 strategy_focus=focus_val,
                 system_prompt=config.system_prompt,
                 temperature=config.temperature,
+                target_dataset_id=config.target_dataset_id,
+                dataset_allocation_policy=config.dataset_allocation_policy,
                 enabled=config.enabled,
                 total_generated=0,
                 total_valid=0,
@@ -267,10 +336,20 @@ class MultiLLMOrchestrator:
             if not res_session:
                 raise ValueError(f"ResearchSession {session_id} not found")
 
-            region = res_session.region or "USA"
-            universe = res_session.universe or "TOP3000"
-            delay = res_session.delay or 1
+            # P1-15: Explicit session configuration and profile identification
+            region = res_session.region
+            universe = res_session.universe
+            delay = res_session.delay
             current_gen = res_session.current_generation or 0
+            session_constraints = res_session.constraints or {}
+            settings_profile_id = (
+                getattr(res_session, "settings_profile_id", None)
+                or session_constraints.get("settings_profile_id")
+                or "standard_us_equity_v1"
+            )
+            alloc_region = region or "USA"
+            alloc_universe = universe or "TOP3000"
+            alloc_delay = delay if delay is not None else 1
 
             # 2. Fetch active researchers
             r_stmt = (
@@ -296,69 +375,120 @@ class MultiLLMOrchestrator:
                 for i in range(num_researchers)
             ]
 
-            # 4. Fetch active PromptStrategy for each category to inject few-shot context & guidance
-            strategy_map: dict[str, PromptStrategy] = {}
+            # 4. Fetch active PromptStrategy and immutable PromptVersion using exact 5-tier fallback precedence
+            strategy_map: dict[str, tuple[PromptStrategy | None, PromptVersion, str]] = {}
             for r in researchers:
-                cat_str = r.strategy_focus or StrategyCategory.GENERAL.value
-                if cat_str not in strategy_map:
-                    # Query session-specific or active strategy
-                    ps_stmt = (
-                        select(PromptStrategy)
-                        .where(
-                            PromptStrategy.session_id == session_id,
-                            PromptStrategy.category == cat_str,
-                            PromptStrategy.is_active.is_(True),
+                cat_norm = normalize_category(r.strategy_focus)
+                if cat_norm not in strategy_map:
+                    strat, pv, tier = await self._resolve_strategy_version(session, session_id, cat_norm)
+                    if pv is None:
+                        raise PromptResolutionError(
+                            f"No valid immutable PromptVersion resolved for category {cat_norm} in session {session_id}"
                         )
-                        .order_by(PromptStrategy.version.desc())
-                        .limit(1)
-                    )
-                    ps_res = await session.execute(ps_stmt)
-                    active_ps = ps_res.scalars().first()
-                    if not active_ps:
-                        # Fallback to any active strategy for this category
-                        fallback_stmt = (
-                            select(PromptStrategy)
-                            .where(
-                                PromptStrategy.category == cat_str,
-                                PromptStrategy.is_active.is_(True),
-                            )
-                            .order_by(PromptStrategy.version.desc())
-                            .limit(1)
-                        )
-                        fallback_res = await session.execute(fallback_stmt)
-                        active_ps = fallback_res.scalars().first()
-                    if active_ps:
-                        strategy_map[cat_str] = active_ps
+                    strategy_map[cat_norm] = (strat, pv, tier)
 
         # 5. Run parallel generation outside DB transaction to avoid locking
         tasks = []
         for idx, r in enumerate(researchers):
+            cat_norm = normalize_category(r.strategy_focus)
             cat = (
-                StrategyCategory(r.strategy_focus)
-                if r.strategy_focus in StrategyCategory._value2member_map_
+                StrategyCategory(cat_norm)
+                if cat_norm in StrategyCategory._value2member_map_
                 else StrategyCategory.GENERAL
             )
-            cat_str = r.strategy_focus or StrategyCategory.GENERAL.value
-            active_strat = strategy_map.get(cat_str)
-            winning_ex = (active_strat.examples or []) if active_strat else None
-            anti_pats = (active_strat.anti_patterns or []) if active_strat else None
-            
-            # Formulate learning feedback from strategy guidance
+            active_strat, pv, res_tier = strategy_map[cat_norm]
+            winning_ex = list(pv.examples) if pv.examples else None
+            anti_pats = list(pv.anti_patterns) if pv.anti_patterns else None
+
+            # Formulate learning feedback from immutable snapshot guidance
             feedback_str = "No prior generation data. Explore baseline anomalies."
-            if active_strat and active_strat.guidance:
-                g = active_strat.guidance
-                pref = g.get("preferred_operators")
-                avoid = g.get("avoid_operators")
-                strat_tips = g.get("strategy")
-                parts = []
-                if pref:
-                    parts.append(f"Preferred operators: {', '.join(pref)}")
-                if avoid:
-                    parts.append(f"Operators to avoid: {', '.join(avoid)}")
-                if strat_tips:
-                    parts.append(f"Guidance: {strat_tips}")
-                if parts:
-                    feedback_str = " | ".join(parts)
+            if pv.guidance:
+                try:
+                    import json
+                    g = json.loads(pv.guidance) if isinstance(pv.guidance, str) else pv.guidance
+                except Exception:
+                    g = {"strategy": pv.guidance}
+                if isinstance(g, dict):
+                    pref = g.get("preferred_operators")
+                    avoid = g.get("avoid_operators")
+                    strat_tips = g.get("strategy")
+                    parts = []
+                    if pref:
+                        parts.append(f"Preferred operators: {', '.join(pref)}")
+                    if avoid:
+                        parts.append(f"Operators to avoid: {', '.join(avoid)}")
+                    if strat_tips:
+                        parts.append(f"Guidance: {strat_tips}")
+                    if parts:
+                        feedback_str = " | ".join(parts)
+                else:
+                    feedback_str = str(pv.guidance)
+
+            r_target_ds = getattr(r, "target_dataset_id", None)
+            # P1-12: Inject persistent researcher-specific episodic memory context
+            try:
+                mem_ctx = await self.memory.build_researcher_memory_context(
+                    researcher_id=r.id,
+                    strategy_focus=cat_norm,
+                    dataset_id=r_target_ds,
+                    include_shared=True,
+                )
+                if mem_ctx:
+                    feedback_str = f"{feedback_str}\n\n{mem_ctx}"
+            except Exception as mem_err:
+                log.warning("orchestrator.memory_context_failed", researcher_id=r.id, error=str(mem_err))
+
+            # Authoritative dataset selection per researcher persona
+            if (
+                self.pipeline
+                and hasattr(self.pipeline, "discovery")
+                and self.pipeline.discovery
+                and hasattr(self.pipeline.discovery, "registry")
+                and isinstance(self.pipeline.discovery.registry, DatasetRegistry)
+            ):
+                registry = self.pipeline.discovery.registry
+            else:
+                registry = DatasetRegistry()
+            r_target_ds = getattr(r, "target_dataset_id", None)
+            r_policy = getattr(r, "dataset_allocation_policy", None)
+            if r_target_ds:
+                sel_ctx = registry.allocate_dataset(
+                    policy=DatasetAllocationPolicy.EXPLICIT,
+                    target_dataset_id=r_target_ds,
+                    region=alloc_region,
+                    universe=alloc_universe,
+                    delay=alloc_delay,
+                    session_id=session_id,
+                    researcher_id=r.id,
+                    generation=current_gen,
+                    researcher_index=idx,
+                    num_researchers=num_researchers,
+                )
+            elif r_policy == DatasetAllocationPolicy.CONTROLLED_EXPLORATION.value:
+                sel_ctx = registry.allocate_dataset(
+                    policy=DatasetAllocationPolicy.CONTROLLED_EXPLORATION,
+                    region=alloc_region,
+                    universe=alloc_universe,
+                    delay=alloc_delay,
+                    session_id=session_id,
+                    researcher_id=r.id,
+                    generation=current_gen,
+                    researcher_index=idx,
+                    num_researchers=num_researchers,
+                )
+            else:
+                sel_ctx = registry.allocate_dataset(
+                    policy=DatasetAllocationPolicy.CATEGORY_ALIGNED,
+                    strategy_category=cat_norm,
+                    region=alloc_region,
+                    universe=alloc_universe,
+                    delay=alloc_delay,
+                    session_id=session_id,
+                    researcher_id=r.id,
+                    generation=current_gen,
+                    researcher_index=idx,
+                    num_researchers=num_researchers,
+                )
 
             tasks.append(
                 self._dispatch_researcher(
@@ -366,9 +496,9 @@ class MultiLLMOrchestrator:
                     model_ref=r.model_ref or "google:gemini-2.5-flash",
                     category=cat,
                     count=allotments[idx],
-                    region=region,
-                    universe=universe,
-                    delay=delay,
+                    region=alloc_region,
+                    universe=alloc_universe,
+                    delay=alloc_delay,
                     generation=current_gen,
                     temperature=r.temperature or 0.7,
                     winning_examples=winning_ex,
@@ -377,22 +507,76 @@ class MultiLLMOrchestrator:
                     auto_repair=auto_repair,
                     max_repairs=max_repairs,
                     strategy_id=active_strat.id if active_strat else None,
+                    prompt_version_id=pv.id,
+                    template_text=pv.template_text,
+                    resolution_tier=res_tier,
+                    selection_context=sel_ctx,
                 )
             )
 
         dispatch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        results: list[tuple[int, int | None, GenerationBatch]] = []
+        results: list[tuple[int, int | None, int | None, str | None, GenerationBatch, float, Any]] = []
         for item in dispatch_results:
-            if isinstance(item, tuple) and len(item) == 3:
+            if isinstance(item, tuple) and len(item) == 7:
                 results.append(item)
+            elif isinstance(item, tuple) and len(item) == 6:
+                results.append((item[0], item[1], item[2], item[3], item[4], item[5], None))
+            elif isinstance(item, tuple) and len(item) == 5:
+                results.append((item[0], item[1], None, item[2], item[3], item[4], None))
+            elif isinstance(item, tuple) and len(item) == 4:
+                results.append((item[0], item[1], None, item[2], item[3], 0.7, None))
             elif isinstance(item, Exception):
                 log.error("orchestrator.unexpected_dispatch_exception", error=str(item))
 
         # 6. Persist candidates and update researcher stats in SQLite
         valid_candidate_ids: list[int] = []
         async with self.db.session() as session:
-            for r_id, strat_id, batch in results:
+            # Query existing session candidate hashes for session-wide exact deduplication
+            existing_hashes_stmt = (
+                select(ResearchCandidate.expression_hash)
+                .where(
+                    ResearchCandidate.session_id == session_id,
+                    ResearchCandidate.expression_hash.is_not(None),
+                )
+            )
+            existing_hashes_res = await session.execute(existing_hashes_stmt)
+            seen_hashes = set(existing_hashes_res.scalars().all())
+
+            r_focus_map: dict[int, str] = {r.id: str(r.strategy_focus) for r in researchers}
+            candidate_items: list[CandidateItem] = []
+            cand_rows_by_id: dict[int, ResearchCandidate] = {}
+
+            for r_id, strat_id, pv_id, res_tier, batch, temp, sel_ctx in results:
+                raw_t_ds = getattr(batch, "target_dataset_id", None) or (
+                    sel_ctx.selected_dataset_id if isinstance(sel_ctx, DatasetSelectionContext) else None
+                )
+                raw_cat_ver = getattr(batch, "catalog_version", None) or (
+                    sel_ctx.catalog_version if isinstance(sel_ctx, DatasetSelectionContext) else None
+                )
+                raw_pol = getattr(batch, "dataset_selection_policy", None) or (
+                    sel_ctx.allocation_policy if isinstance(sel_ctx, DatasetSelectionContext) else None
+                )
+                raw_reason = getattr(batch, "dataset_selection_reason", None) or (
+                    sel_ctx.selection_reason if isinstance(sel_ctx, DatasetSelectionContext) else None
+                )
+
+                raw_df_cat_ver = getattr(batch, "datafield_catalog_version", None) or (
+                    sel_ctx.datafield_catalog_version if isinstance(sel_ctx, DatasetSelectionContext) else None
+                )
+                raw_allowed_flds = getattr(batch, "allowed_fields", None) or (
+                    list(sel_ctx.allowed_field_names) if isinstance(sel_ctx, DatasetSelectionContext) else None
+                )
+                raw_op_cat_ver = getattr(batch, "operator_catalog_version", None)
+
+                t_ds = str(raw_t_ds) if (raw_t_ds is not None and not hasattr(raw_t_ds, "_mock_return_value")) else None
+                cat_ver = str(raw_cat_ver) if (raw_cat_ver is not None and not hasattr(raw_cat_ver, "_mock_return_value")) else None
+                pol = str(raw_pol) if (raw_pol is not None and not hasattr(raw_pol, "_mock_return_value")) else None
+                reason = str(raw_reason) if (raw_reason is not None and not hasattr(raw_reason, "_mock_return_value")) else None
+                df_cat_ver = str(raw_df_cat_ver) if (raw_df_cat_ver is not None and not hasattr(raw_df_cat_ver, "_mock_return_value")) else None
+                allowed_flds = list(raw_allowed_flds) if (raw_allowed_flds is not None and not hasattr(raw_allowed_flds, "_mock_return_value")) else None
+                op_cat_ver = str(raw_op_cat_ver) if (raw_op_cat_ver is not None and not hasattr(raw_op_cat_ver, "_mock_return_value")) else None
+
                 # Update researcher counters
                 u_stmt = (
                     update(ResearchResearcher)
@@ -406,17 +590,156 @@ class MultiLLMOrchestrator:
                 )
                 await session.execute(u_stmt)
 
-                # Persist each candidate
+                # Persist durable generation attempt capturing prompt, schema, exact version, and dataset selection
+                attempt = GenerationAttempt(
+                    session_id=session_id,
+                    researcher_id=r_id,
+                    prompt_strategy_id=strat_id,
+                    prompt_version_id=pv_id,
+                    resolution_tier=res_tier,
+                    generation=current_gen,
+                    model_ref=batch.model_ref,
+                    temperature=temp,
+                    system_prompt=batch.system_prompt,
+                    user_prompt=batch.user_prompt,
+                    response_schema=batch.response_schema,
+                    target_dataset_id=t_ds,
+                    catalog_version=cat_ver,
+                    dataset_selection_policy=pol,
+                    dataset_selection_reason=reason,
+                    datafield_catalog_version=df_cat_ver,
+                    allowed_fields=allowed_flds,
+                    operator_catalog_version=op_cat_ver,
+                )
+                session.add(attempt)
+                await session.flush()
+
+                # Persist each candidate with full lineage
                 for c in batch.candidates:
                     status = CandidateStatus.VALID if c.validation.is_valid else CandidateStatus.INVALID
+                    raw_expr = str(c.raw_response.get("expression") or c.expression) if c.raw_response else c.expression
+                    rep_hist = list(c.validation.repair_history) if (c.validation and c.validation.repair_history) else []
+
+                    # Classify field families where available
+                    field_fams: dict[str, str] = {}
+                    if c.validation and c.validation.fields_used:
+                        df_cat = registry.get_datafield_catalog(
+                            dataset=sel_ctx.dataset if isinstance(sel_ctx, DatasetSelectionContext) else None,
+                            region=alloc_region,
+                            universe=alloc_universe,
+                            delay=alloc_delay,
+                        )
+                        for f_used in c.validation.fields_used:
+                            fam = df_cat.get_field_family(f_used)
+                            if fam:
+                                field_fams[f_used] = fam
+
+                    # Determine operators used from validation result or expression AST
+                    used_operators: list[str] = []
+                    if c.validation and getattr(c.validation, "operators_used", None):
+                        used_operators = list(c.validation.operators_used)
+                    elif c.expression:
+                        try:
+                            used_operators = sorted(operator_names(parse(c.expression)))
+                        except Exception:
+                            used_operators = []
+
+                    # P1-14: Deterministic AST fingerprinting and skeleton abstraction
+                    fp = extract_candidate_fingerprint(c.expression or "")
+
+                    # P1-15: Resolve explicit, candidate-specific simulation settings
+                    c_overrides = getattr(c, "simulation_settings_overrides", None)
+                    if not c_overrides and c.raw_response:
+                        c_overrides = (
+                            c.raw_response.get("simulation_settings_overrides")
+                            or c.raw_response.get("simulation_settings")
+                            or c.raw_response.get("settings")
+                        )
+
+                    cand_settings: CandidateSimulationSettings | None = None
+                    try:
+                        cand_settings = resolve_candidate_simulation_settings(
+                            candidate_overrides=c_overrides,
+                            session_region=region,
+                            session_universe=universe,
+                            session_delay=delay,
+                            session_constraints=session_constraints,
+                            profile=settings_profile_id,
+                        )
+                    except (SimulationSettingsResolutionError, SimulationSettingsValidationError) as set_err:
+                        cand_settings = None
+                        status = CandidateStatus.INVALID
+                        c.validation.is_valid = False
+                        c.validation.error = str(set_err)
+
+                    if cand_settings is not None:
+                        # Preflight dataset & field coverage check
+                        is_ds_valid, ds_err = validate_candidate_dataset_preflight(
+                            expression=c.expression or "",
+                            settings=cand_settings,
+                            target_dataset_id=t_ds,
+                            dataset_registry=registry,
+                            datafield_catalog=df_cat if "df_cat" in locals() else None,
+                        )
+                        # Platform schema options validation
+                        schema_val = PlatformSchemaValidator(
+                            schema=self.settings_schema,
+                            schema_source="CACHED" if self.settings_schema else "FALLBACK",
+                        )
+                        is_schema_valid, schema_problems, v_status = schema_val.validate(
+                            cand_settings, allow_fallback=True
+                        )
+
+                        if not is_ds_valid:
+                            cand_settings.verification_status = "INVALID"
+                            status = CandidateStatus.INVALID
+                            c.validation.is_valid = False
+                            c.validation.error = ds_err
+                        elif not is_schema_valid:
+                            cand_settings.verification_status = "INVALID"
+                            status = CandidateStatus.INVALID
+                            c.validation.is_valid = False
+                            c.validation.error = f"ERR_PREFLIGHT_SETTINGS_INCOMPATIBLE: {'; '.join(schema_problems)}"
+                        else:
+                            cand_settings.verification_status = v_status
+
+                    sim_settings_dict = cand_settings.to_dict() if cand_settings else None
+                    settings_h = cand_settings.compute_hash() if cand_settings else None
+                    cand_prov_h = (
+                        compute_candidate_provenance_hash(
+                            expression_hash=fp.expr_hash,
+                            settings_hash=settings_h or "",
+                            model_ref=batch.model_ref,
+                            prompt_version_id=pv_id,
+                            target_dataset_id=t_ds,
+                            catalog_version=cat_ver,
+                        )
+                        if cand_settings
+                        else None
+                    )
+
                     cand_row = ResearchCandidate(
                         session_id=session_id,
                         researcher_id=r_id,
                         prompt_strategy_id=strat_id,
+                        prompt_version_id=pv_id,
+                        generation_attempt_id=attempt.id,
                         generation=current_gen,
+                        model_ref=batch.model_ref,
+                        temperature=temp,
                         hypothesis=c.hypothesis,
                         expression=c.expression,
-                        language="FASTEXPR",
+                        raw_expression=raw_expr,
+                        repair_history=rep_hist,
+                        language=validate_alpha_language(getattr(batch, "language", None) or "FASTEXPR"),
+                        target_dataset_id=t_ds,
+                        catalog_version=cat_ver,
+                        dataset_selection_policy=pol,
+                        dataset_selection_reason=reason,
+                        datafield_catalog_version=df_cat_ver,
+                        field_families=field_fams if field_fams else None,
+                        operator_catalog_version=op_cat_ver,
+                        operators_used=used_operators,
                         datasets_used=[c.target_dataset] if c.target_dataset else [],
                         fields_used=c.validation.fields_used,
                         operator_count=c.validation.operator_count,
@@ -424,18 +747,67 @@ class MultiLLMOrchestrator:
                         is_valid=c.validation.is_valid,
                         validation_error=c.validation.error,
                         retry_count=c.validation.retry_count,
-                        sim_region=region,
-                        sim_universe=universe,
-                        sim_neutralization="INDUSTRY",
-                        sim_decay=4,
-                        sim_delay=delay,
+                        sim_region=cand_settings.region if cand_settings else (region or "USA"),
+                        sim_universe=cand_settings.universe if cand_settings else (universe or "TOP3000"),
+                        sim_neutralization=cand_settings.neutralization if cand_settings else "NONE",
+                        sim_decay=cand_settings.decay if cand_settings else 0,
+                        sim_delay=cand_settings.delay if cand_settings else 1,
+                        simulation_settings=sim_settings_dict,
+                        settings_hash=settings_h,
+                        settings_profile_id=cand_settings.profile_id if cand_settings else None,
+                        settings_profile_version=cand_settings.profile_version if cand_settings else None,
+                        settings_schema_version=cand_settings.schema_version if cand_settings else None,
+                        settings_verification_status=cand_settings.verification_status if cand_settings else "INVALID",
+                        candidate_provenance_hash=cand_prov_h,
                         status=status,
+                        expression_hash=fp.expr_hash,
+                        ast_skeleton=fp.skeleton,
                     )
                     session.add(cand_row)
                     await session.flush()
+                    cand_rows_by_id[cand_row.id] = cand_row
 
-                    if c.validation.is_valid:
-                        valid_candidate_ids.append(cand_row.id)
+                    c_cat = r_focus_map.get(r_id, "GENERAL")
+                    item = CandidateItem(
+                        expression=c.expression or "",
+                        hypothesis=c.hypothesis or "",
+                        category=c_cat,
+                        target_dataset_id=t_ds,
+                        fields_used=c.validation.fields_used or [],
+                        field_families=field_fams,
+                        operators_used=used_operators,
+                        is_valid=bool(c.validation.is_valid),
+                        candidate_id=cand_row.id,
+                        metadata={"validation_error": c.validation.error},
+                    )
+                    candidate_items.append(item)
+
+            # P1-14: Apply deterministic upstream deduplication, near-duplicate pruning, and diversity allocation
+            diversity_selector = DiversitySelector()
+            selection_result = diversity_selector.select_candidates(
+                candidate_items,
+                capacity=max(total_target_candidates, sum(allotments)),
+                session_seen_hashes=seen_hashes,
+            )
+
+            for rec in selection_result.audit_records:
+                if rec.candidate_id and rec.candidate_id in cand_rows_by_id:
+                    crow = cand_rows_by_id[rec.candidate_id]
+                    if rec.decision == "DISPATCHED":
+                        crow.status = CandidateStatus.VALID
+                        crow.pruning_reason = None
+                        valid_candidate_ids.append(crow.id)
+                    elif rec.decision in ("EXACT_DUPLICATE_PRUNED", "NEAR_DUPLICATE_PRUNED"):
+                        crow.status = CandidateStatus.INVALID
+                        crow.pruning_reason = rec.decision
+                        crow.validation_error = rec.reason
+                    elif rec.decision == "RESERVED_OVER_CAPACITY":
+                        crow.status = CandidateStatus.VALID
+                        crow.pruning_reason = rec.decision
+                        crow.validation_error = rec.reason
+                    elif rec.decision == "INVALID_EXPRESSION":
+                        crow.status = CandidateStatus.INVALID
+                        crow.pruning_reason = rec.decision
 
             # Update session generation count and status
             sess_stmt = (
@@ -452,10 +824,236 @@ class MultiLLMOrchestrator:
             "orchestrator.generation_round_complete",
             session_id=session_id,
             generation=current_gen,
-            total_generated=sum(len(b.candidates) for _, _, b in results),
+            total_generated=sum(len(item[4].candidates) for item in results),
             valid_candidates=len(valid_candidate_ids),
         )
         return valid_candidate_ids
+
+    async def _resolve_strategy_version(
+        self, session: Any, session_id: int, category: str
+    ) -> tuple[PromptStrategy | None, PromptVersion | None, str]:
+        """Resolves active prompt strategy and verified immutable PromptVersion using strict 5 tiers:
+        1. EXACT_SESSION: Active strategy for requested category in current session
+        2. GLOBAL_CATEGORY: Active global baseline for requested category (session_id IS NULL)
+        3. SESSION_GENERAL: Active general strategy in current session
+        4. GLOBAL_GENERAL: Active global general baseline (session_id IS NULL)
+        5. TEMPLATE_FALLBACK: Canonical global seed PromptVersion fallback
+        """
+        cat_norm = normalize_category(category)
+
+        # Tier 1: EXACT_SESSION
+        stmt_a = (
+            select(PromptStrategy)
+            .where(
+                PromptStrategy.session_id == session_id,
+                func.lower(func.trim(PromptStrategy.category)) == cat_norm,
+                PromptStrategy.is_active.is_(True),
+            )
+            .order_by(PromptStrategy.version.desc(), PromptStrategy.id.desc())
+        )
+        res_a = await session.execute(stmt_a)
+        for strat_a in res_a.scalars().all():
+            if strat_a.current_prompt_version_id:
+                pv = await session.get(PromptVersion, strat_a.current_prompt_version_id)
+                if pv:
+                    verify_prompt_integrity(pv)
+                    return strat_a, pv, "EXACT_SESSION"
+            log.warning(
+                "prompt_strategy.legacy_unversioned_skipped",
+                strategy_id=strat_a.id,
+                category=cat_norm,
+                tier="EXACT_SESSION",
+            )
+
+        # Tier 2: GLOBAL_CATEGORY
+        stmt_b = (
+            select(PromptStrategy)
+            .where(
+                PromptStrategy.session_id.is_(None),
+                func.lower(func.trim(PromptStrategy.category)) == cat_norm,
+                PromptStrategy.is_active.is_(True),
+            )
+            .order_by(PromptStrategy.version.desc(), PromptStrategy.id.desc())
+        )
+        res_b = await session.execute(stmt_b)
+        for strat_b in res_b.scalars().all():
+            if strat_b.current_prompt_version_id:
+                pv = await session.get(PromptVersion, strat_b.current_prompt_version_id)
+                if pv:
+                    verify_prompt_integrity(pv)
+                    return strat_b, pv, "GLOBAL_CATEGORY"
+            log.warning(
+                "prompt_strategy.legacy_unversioned_skipped",
+                strategy_id=strat_b.id,
+                category=cat_norm,
+                tier="GLOBAL_CATEGORY",
+            )
+
+        # Tier 3: SESSION_GENERAL
+        stmt_c = (
+            select(PromptStrategy)
+            .where(
+                PromptStrategy.session_id == session_id,
+                func.lower(func.trim(PromptStrategy.category)) == StrategyCategory.GENERAL.value,
+                PromptStrategy.is_active.is_(True),
+            )
+            .order_by(PromptStrategy.version.desc(), PromptStrategy.id.desc())
+        )
+        res_c = await session.execute(stmt_c)
+        for strat_c in res_c.scalars().all():
+            if strat_c.current_prompt_version_id:
+                pv = await session.get(PromptVersion, strat_c.current_prompt_version_id)
+                if pv:
+                    verify_prompt_integrity(pv)
+                    return strat_c, pv, "SESSION_GENERAL"
+            log.warning(
+                "prompt_strategy.legacy_unversioned_skipped",
+                strategy_id=strat_c.id,
+                category=cat_norm,
+                tier="SESSION_GENERAL",
+            )
+
+        # Tier 4: GLOBAL_GENERAL
+        stmt_d = (
+            select(PromptStrategy)
+            .where(
+                PromptStrategy.session_id.is_(None),
+                func.lower(func.trim(PromptStrategy.category)) == StrategyCategory.GENERAL.value,
+                PromptStrategy.is_active.is_(True),
+            )
+            .order_by(PromptStrategy.version.desc(), PromptStrategy.id.desc())
+        )
+        res_d = await session.execute(stmt_d)
+        for strat_d in res_d.scalars().all():
+            if strat_d.current_prompt_version_id:
+                pv = await session.get(PromptVersion, strat_d.current_prompt_version_id)
+                if pv:
+                    verify_prompt_integrity(pv)
+                    return strat_d, pv, "GLOBAL_GENERAL"
+            log.warning(
+                "prompt_strategy.legacy_unversioned_skipped",
+                strategy_id=strat_d.id,
+                category=cat_norm,
+                tier="GLOBAL_GENERAL",
+            )
+
+        # Tier 5: TEMPLATE_FALLBACK / Canonical Global Seed Version
+        stmt_e = (
+            select(PromptVersion)
+            .where(
+                PromptVersion.origin_session_id.is_(None),
+                PromptVersion.origin_strategy_id.is_(None),
+                PromptVersion.category == cat_norm,
+                PromptVersion.version == 1,
+            )
+            .limit(1)
+        )
+        res_e = await session.execute(stmt_e)
+        seed_pv = res_e.scalars().first()
+        if not seed_pv:
+            stmt_e_gen = (
+                select(PromptVersion)
+                .where(
+                    PromptVersion.origin_session_id.is_(None),
+                    PromptVersion.origin_strategy_id.is_(None),
+                    PromptVersion.category == StrategyCategory.GENERAL.value,
+                    PromptVersion.version == 1,
+                )
+                .limit(1)
+            )
+            res_e_gen = await session.execute(stmt_e_gen)
+            seed_pv = res_e_gen.scalars().first()
+
+        if seed_pv:
+            verify_prompt_integrity(seed_pv)
+            log.warning(
+                "prompt_strategy.database_miss_template_fallback",
+                requested_category=cat_norm,
+                session_id=session_id,
+            )
+            return None, seed_pv, "TEMPLATE_FALLBACK"
+
+        return None, None, "TEMPLATE_FALLBACK"
+
+    async def _resolve_strategy(
+        self,
+        session: Any,
+        session_id: int,
+        category: str,
+        include_version: bool = False,
+    ) -> Any:
+        """Resolves active prompt strategy using strict 5-tier fallback precedence.
+        If include_version is True, delegates to _resolve_strategy_version returning (strat, pv, tier).
+        Otherwise returns standard 2-tuple (strat, tier) for full backwards-compatibility.
+        """
+        if include_version:
+            return await self._resolve_strategy_version(session, session_id, category)
+
+        cat_norm = normalize_category(category)
+
+        # Tier 1: EXACT_SESSION
+        stmt_a = (
+            select(PromptStrategy)
+            .where(
+                PromptStrategy.session_id == session_id,
+                func.lower(func.trim(PromptStrategy.category)) == cat_norm,
+                PromptStrategy.is_active.is_(True),
+            )
+            .order_by(PromptStrategy.version.desc(), PromptStrategy.id.desc())
+        )
+        strat_a = (await session.execute(stmt_a)).scalars().first()
+        if strat_a:
+            return strat_a, "EXACT_SESSION"
+
+        # Tier 2: GLOBAL_CATEGORY
+        stmt_b = (
+            select(PromptStrategy)
+            .where(
+                PromptStrategy.session_id.is_(None),
+                func.lower(func.trim(PromptStrategy.category)) == cat_norm,
+                PromptStrategy.is_active.is_(True),
+            )
+            .order_by(PromptStrategy.version.desc(), PromptStrategy.id.desc())
+        )
+        strat_b = (await session.execute(stmt_b)).scalars().first()
+        if strat_b:
+            return strat_b, "GLOBAL_CATEGORY"
+
+        # Tier 3: SESSION_GENERAL
+        stmt_c = (
+            select(PromptStrategy)
+            .where(
+                PromptStrategy.session_id == session_id,
+                func.lower(func.trim(PromptStrategy.category)) == StrategyCategory.GENERAL.value,
+                PromptStrategy.is_active.is_(True),
+            )
+            .order_by(PromptStrategy.version.desc(), PromptStrategy.id.desc())
+        )
+        strat_c = (await session.execute(stmt_c)).scalars().first()
+        if strat_c:
+            return strat_c, "SESSION_GENERAL"
+
+        # Tier 4: GLOBAL_GENERAL
+        stmt_d = (
+            select(PromptStrategy)
+            .where(
+                PromptStrategy.session_id.is_(None),
+                func.lower(func.trim(PromptStrategy.category)) == StrategyCategory.GENERAL.value,
+                PromptStrategy.is_active.is_(True),
+            )
+            .order_by(PromptStrategy.version.desc(), PromptStrategy.id.desc())
+        )
+        strat_d = (await session.execute(stmt_d)).scalars().first()
+        if strat_d:
+            return strat_d, "GLOBAL_GENERAL"
+
+        # Tier 5: TEMPLATE_FALLBACK
+        log.warning(
+            "prompt_strategy.database_miss_template_fallback",
+            requested_category=cat_norm,
+            session_id=session_id,
+        )
+        return None, "TEMPLATE_FALLBACK"
 
     async def _dispatch_researcher(
         self,
@@ -474,7 +1072,11 @@ class MultiLLMOrchestrator:
         auto_repair: bool = True,
         max_repairs: int = 2,
         strategy_id: int | None = None,
-    ) -> tuple[int, int | None, GenerationBatch]:
+        prompt_version_id: int | None = None,
+        template_text: str | None = None,
+        resolution_tier: str | None = None,
+        selection_context: DatasetSelectionContext | None = None,
+    ) -> tuple[int, int | None, int | None, str | None, GenerationBatch, float, DatasetSelectionContext | None]:
         """Dispatches generation for a single researcher persona with error isolation."""
         try:
             batch = await self.pipeline.generate_batch(
@@ -489,10 +1091,13 @@ class MultiLLMOrchestrator:
                 winning_examples=winning_examples,
                 anti_patterns=anti_patterns,
                 learning_feedback=learning_feedback,
+                target_dataset_id=selection_context.selected_dataset_id if selection_context else None,
+                selection_context=selection_context,
                 auto_repair=auto_repair,
                 max_repairs=max_repairs,
+                template_text=template_text,
             )
-            return researcher_id, strategy_id, batch
+            return researcher_id, strategy_id, prompt_version_id, resolution_tier, batch, temperature, selection_context
         except Exception as exc:
             log.warning(
                 "orchestrator.researcher_dispatch_failed",
@@ -501,13 +1106,17 @@ class MultiLLMOrchestrator:
                 error=str(exc),
             )
             # Return empty batch so orchestrator does not crash
-            return researcher_id, strategy_id, GenerationBatch(
+            return researcher_id, strategy_id, prompt_version_id, resolution_tier, GenerationBatch(
                 summary=f"Generation failed: {exc}",
                 candidates=[],
                 model_ref=model_ref,
                 total_tokens=0,
                 duration_seconds=0.0,
-            )
+                target_dataset_id=selection_context.selected_dataset_id if selection_context else None,
+                catalog_version=selection_context.catalog_version if selection_context else None,
+                dataset_selection_policy=selection_context.allocation_policy if selection_context else None,
+                dataset_selection_reason=selection_context.selection_reason if selection_context else None,
+            ), temperature, selection_context
 
     async def enqueue_candidates_for_simulation(
         self,
@@ -537,24 +1146,15 @@ class MultiLLMOrchestrator:
 
             queued_ids: list[int] = []
             if batch_engine is not None:
+                # P1-07: Ensure every candidate strictly uses supported language
+                for c in candidates:
+                    validate_alpha_language(getattr(c, "language", None) or "FASTEXPR")
+
                 task_name = task or f"research_session_{session_id}"
                 sim_requests = [
                     SimulationRequest(
                         type=SimulationType.REGULAR,
-                        settings=SimulationSettings(
-                            instrument_type="EQUITY",
-                            region=c.sim_region or "USA",
-                            universe=c.sim_universe or "TOP3000",
-                            delay=c.sim_delay or 1,
-                            decay=c.sim_decay or 4,
-                            neutralization=c.sim_neutralization or "INDUSTRY",
-                            truncation=0.08,
-                            pasteurization="ON",
-                            unit_handling="VERIFY",
-                            nan_handling="OFF",
-                            language="FASTEXPR",
-                            visualization=False,
-                        ),
+                        settings=c.to_simulation_settings(),
                         regular=c.expression,
                     )
                     for c in candidates

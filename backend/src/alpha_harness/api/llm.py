@@ -4,6 +4,8 @@ Prompts are served in full on purpose: one decides what an answer looks like and
 otherwise invisible. Keys are the only secret here, and leave only as a masked hint.
 """
 
+from __future__ import annotations
+
 from typing import Any, Literal
 
 from fastapi import APIRouter

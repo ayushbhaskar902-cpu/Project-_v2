@@ -3,6 +3,8 @@
 Nothing here calls the LLM or simulates; the preview shows the exact first prompt.
 """
 
+from __future__ import annotations
+
 from typing import Any
 
 from fastapi import APIRouter

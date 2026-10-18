@@ -26,6 +26,42 @@ class StrategyCategory(StrEnum):
     GENERAL = "general"
 
 
+def normalize_category(cat: str | StrategyCategory | None) -> str:
+    """Canonicalizes category names while preserving valid custom category identities.
+
+    Rules:
+    1. None, empty string, or whitespace-only -> 'general' (the documented default fallback).
+    2. Matches recognized StrategyCategory enum (by value or name, case-insensitive) -> canonical enum value.
+    3. Typographical variants of canonical categories (e.g. 'mean-reversion', 'mean reversion') -> canonical enum value.
+    4. Non-empty custom string (e.g. 'reversal', 'sentiment') -> lowercased, trimmed string identity (preserved as-is).
+    """
+    if cat is None:
+        return StrategyCategory.GENERAL.value
+    if isinstance(cat, StrategyCategory):
+        return cat.value
+
+    s = str(cat).strip()
+    if not s:
+        return StrategyCategory.GENERAL.value
+
+    s_lower = s.lower()
+    for member in StrategyCategory:
+        if s_lower == member.value or s.upper() == member.name:
+            return member.value
+
+    # Canonical typographical aliases for existing StrategyCategory members
+    canonical_aliases: dict[str, str] = {
+        "mean-reversion": StrategyCategory.MEAN_REVERSION.value,
+        "mean reversion": StrategyCategory.MEAN_REVERSION.value,
+        "meanreversion": StrategyCategory.MEAN_REVERSION.value,
+    }
+    if s_lower in canonical_aliases:
+        return canonical_aliases[s_lower]
+
+    return s_lower
+
+
+
 @dataclass(frozen=True, slots=True)
 class PromptTemplate:
     """A versioned template definition for LLM researchers."""
@@ -347,8 +383,8 @@ class PromptLibrary:
         for category, tmpl in SEED_TEMPLATES.items():
             self._templates[category.value] = tmpl
 
-    def get_template(self, category: str | StrategyCategory) -> PromptTemplate:
-        cat_key = category.value if isinstance(category, StrategyCategory) else str(category).lower()
+    def get_template(self, category: str | StrategyCategory | None) -> PromptTemplate:
+        cat_key = normalize_category(category)
         if cat_key in self._templates:
             return self._templates[cat_key]
         return self._templates[StrategyCategory.GENERAL.value]
@@ -358,7 +394,7 @@ class PromptLibrary:
 
     def render(
         self,
-        category: str | StrategyCategory,
+        category: str | StrategyCategory | None,
         catalog_context: str,
         operators_table: str,
         candidate_count: int = 10,
@@ -368,9 +404,11 @@ class PromptLibrary:
         learning_feedback: str = "No prior generation data. Explore baseline anomalies.",
         winning_examples: list[dict[str, Any]] | None = None,
         anti_patterns: list[dict[str, Any]] | None = None,
+        template_text: str | None = None,
     ) -> str:
         """Renders complete prompt text with all variables populated."""
         template = self.get_template(category)
+        active_template_text = template_text if template_text is not None else template.template_text
 
         # Format winning examples
         examples = winning_examples if winning_examples is not None else template.default_examples
@@ -400,7 +438,7 @@ class PromptLibrary:
         else:
             anti_str = "Avoid exceeding 8 operators or 3 data fields."
 
-        return template.template_text.format(
+        return active_template_text.format(
             base_system_role=template.system_role,
             strategy_guidance=template.strategy_guidance,
             catalog_context=catalog_context,
@@ -413,3 +451,215 @@ class PromptLibrary:
             region=region,
             universe=universe,
         )
+
+
+# --- P1-01: Evidence-Grounded LLM Reflection System & Prompts ---
+
+ALLOWED_CITATION_FIELDS: frozenset[str] = frozenset({
+    "expression",
+    "sharpe",
+    "fitness",
+    "turnover",
+    "fields",
+    "operator_count",
+    "sharpe_decay",
+    "after_cost_sharpe",
+})
+
+REFLECTION_SYSTEM_PROMPT = """\
+You are an expert quantitative research review committee and statistical auditor.
+Your job is to objectively analyze the empirical results from the latest alpha generation batch \
+and extract evidence-grounded hypotheses, anti-patterns, and actionable recommendations.
+
+CRITICAL METHODOLOGICAL PRINCIPLES:
+1. CAUSAL HUMILITY: Do not assert unconditional causality. Every claim is an empirical hypothesis \
+based on observed sample data until experimentally validated.
+2. STRICT EVIDENCE GROUNDING: Every hypothesis, anti-pattern, and recommendation MUST include at \
+least one explicit citation to a specific candidate in the evidence batch, naming the candidate ID \
+and the exact field observed (e.g. candidate_id, field="expression", field="sharpe", etc.).
+3. CITATION VALIDATION: You may ONLY cite candidates and fields present in the provided evidence \
+tables. Permitted citation fields are: expression, sharpe, fitness, turnover, fields, operator_count, \
+sharpe_decay, after_cost_sharpe. Never cite candidate IDs or fields not in the batch.
+4. HOLDOUT PROTECTION: Holdout performance metrics are strictly confidential and intentionally omitted. \
+Do not speculate or extrapolate beyond the provided in-sample and validation metrics.
+5. NO HALLUCINATED METRICS: Authoritative performance metrics are deterministically computed by the \
+evaluation engine. Do not synthesize or hallucinate alternative metrics.
+
+You must respond with valid JSON strictly conforming to the requested schema.
+"""
+
+REFLECTION_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": "Executive summary of what was learned from this generation's candidate batch.",
+        },
+        "hypotheses": {
+            "type": "array",
+            "description": "Explanations of empirical patterns observed in the evidence batch. Explicitly treated as unverified hypotheses.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string"},
+                    "confidence": {
+                        "type": "string",
+                        "enum": [
+                            "HIGH_CONFIDENCE_HYPOTHESIS",
+                            "PLAUSIBLE_HYPOTHESIS",
+                            "SPECULATIVE_EXPLORATION",
+                        ],
+                    },
+                    "citations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "candidate_id": {"type": "integer"},
+                                "field": {"type": "string"},
+                                "observed_value": {
+                                    "type": ["string", "number", "array", "null"],
+                                },
+                            },
+                            "required": ["candidate_id", "field"],
+                        },
+                        "minItems": 1,
+                    },
+                },
+                "required": ["claim", "confidence", "citations"],
+            },
+        },
+        "recommendations": {
+            "type": "array",
+            "description": "Actionable prompt guidance adjustments for future alpha discovery rounds.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "rationale": {"type": "string"},
+                    "citations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "candidate_id": {"type": "integer"},
+                                "field": {"type": "string"},
+                                "observed_value": {
+                                    "type": ["string", "number", "array", "null"],
+                                },
+                            },
+                            "required": ["candidate_id", "field"],
+                        },
+                        "minItems": 1,
+                    },
+                },
+                "required": ["action", "rationale", "citations"],
+            },
+        },
+        "anti_patterns": {
+            "type": "array",
+            "description": "Underperforming patterns or failure modes to explicitly caution against.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                    "flaw": {"type": "string"},
+                    "citations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "candidate_id": {"type": "integer"},
+                                "field": {"type": "string"},
+                                "observed_value": {
+                                    "type": ["string", "number", "array", "null"],
+                                },
+                            },
+                            "required": ["candidate_id", "field"],
+                        },
+                        "minItems": 1,
+                    },
+                },
+                "required": ["expression", "flaw", "citations"],
+            },
+        },
+    },
+    "required": ["summary", "hypotheses", "recommendations", "anti_patterns"],
+}
+
+
+def render_reflection_evidence_prompt(
+    session_id: int,
+    generation: int,
+    eligible_candidates: list[dict[str, Any]],
+    factual_stats: dict[str, Any],
+) -> str:
+    """Formats deterministic database evidence into structured text tables for LLM reflection.
+
+    Strictly excludes holdout metrics. Candidates must be eligible and verified.
+    """
+    lines = [
+        f"=== RESEARCH BATCH EVIDENCE REPORT (Session {session_id}, Generation {generation}) ===",
+        "",
+        "--- AUTHORITATIVE BATCH PERFORMANCE STATISTICS (CALCULATED FROM DB) ---",
+        f"Eligible Batch Size: {factual_stats.get('batch_size', len(eligible_candidates))}",
+        f"Average In-Sample/Validation Sharpe: {factual_stats.get('avg_sharpe', 0.0):.3f}",
+        f"Best In-Sample/Validation Sharpe: {factual_stats.get('best_sharpe', 0.0):.3f}",
+        f"Validation Pass Rate: {factual_stats.get('valid_rate', 1.0) * 100:.1f}%",
+    ]
+
+    op_stats = factual_stats.get("operator_stats")
+    if op_stats:
+        lines.append("")
+        lines.append("Authoritative Operator Statistics (P1-09 Controlled Attribution):")
+        lines.append("NOTE: These figures reflect observational statistical associations from validation data, not proven causal drivers.")
+        for op in op_stats:
+            shrunk = op.get("shrunk_lift")
+            confidence = op.get("confidence_level", "UNKNOWN")
+            evidence = op.get("evidence_status", "UNKNOWN")
+            line = (
+                f"- Operator '{op.get('name')}': count={op.get('appearances')}, "
+                f"avg_sharpe={op.get('avg_sharpe', 0.0):.3f}"
+            )
+            if shrunk is not None:
+                line += f", shrunk_lift={shrunk:.4f}, confidence={confidence}, evidence={evidence}"
+            lines.append(line)
+
+    lines.append("")
+    lines.append("--- ELIGIBLE RESEARCH CANDIDATE EVIDENCE ---")
+    lines.append("NOTE: All citations MUST use the Candidate IDs listed below.")
+    lines.append(
+        "Permitted citation fields: expression, sharpe, fitness, turnover, fields, "
+        "operator_count, sharpe_decay, after_cost_sharpe."
+    )
+    lines.append("Holdout metrics are strictly protected and withheld.")
+    lines.append("")
+
+    for cand in eligible_candidates:
+        cid = cand.get("candidate_id")
+        expr = cand.get("expression", "")
+        hyp = cand.get("hypothesis", "")
+        sharpe = cand.get("sharpe", 0.0)
+        fitness = cand.get("fitness", 0.0)
+        turnover = cand.get("turnover", 0.0)
+        op_count = cand.get("operator_count", 0)
+        fields_used = cand.get("fields", [])
+        decay = cand.get("sharpe_decay", 0.0)
+        after_cost = cand.get("after_cost_sharpe", 0.0)
+
+        lines.append(f"[Candidate ID: {cid}]")
+        lines.append(f"  Expression: {expr}")
+        lines.append(f"  Stated Hypothesis: {hyp}")
+        lines.append(
+            f"  Metrics: sharpe={sharpe:.3f}, fitness={fitness:.3f}, turnover={turnover:.3f}, "
+            f"operator_count={op_count}, sharpe_decay={decay:.3f}, after_cost_sharpe={after_cost:.3f}"
+        )
+        lines.append(f"  Fields: {fields_used}")
+        lines.append("")
+
+    lines.append("--- REQUIRED OUTPUT ---")
+    lines.append(
+        "Generate a structured reflection JSON matching the required schema. Ensure every hypothesis, "
+        "recommendation, and anti-pattern has at least one valid citation to the above Candidate IDs."
+    )
+    return "\n".join(lines)

@@ -7,6 +7,8 @@ maxTrade/maxPosition pair. A market only counts when every data field the expres
 is downloaded there, so a two-field Alpha is judged on the intersection.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import math

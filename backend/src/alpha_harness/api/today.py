@@ -10,6 +10,8 @@ by the platform's own number once the first batch comes back. ``exact`` says whi
 are looking at.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Annotated, Any, Literal
 

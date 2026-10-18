@@ -7,6 +7,8 @@ All values are parameterised; the only interpolated identifiers are whitelisted 
 names, because a user-supplied sort key must never reach SQL directly.
 """
 
+from __future__ import annotations
+
 import asyncio
 from datetime import date
 from typing import TYPE_CHECKING, Any, ClassVar

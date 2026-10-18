@@ -12,6 +12,8 @@ Only *finished* simulations count in the denominator. Counting queued work would
 every lab look worse the moment it was funded.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import re
@@ -111,7 +113,7 @@ def checks_of(checks_json: str | None) -> list[dict[str, Any]]:
         return []
     try:
         checks = json.loads(checks_json)
-    except json.JSONDecodeError, TypeError:
+    except (json.JSONDecodeError, TypeError):
         return []
     if not isinstance(checks, list):
         return []

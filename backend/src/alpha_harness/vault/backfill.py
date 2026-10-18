@@ -7,6 +7,8 @@ hence background tasks with visible progress.
 None of this spends simulation quota. It is all reading results that already exist.
 """
 
+from __future__ import annotations
+
 import asyncio
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any

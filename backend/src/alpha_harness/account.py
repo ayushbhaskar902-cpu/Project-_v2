@@ -7,6 +7,8 @@ The session cookie jar is persisted deliberately: signing in costs a proof-of-wo
 and counts against a lockout budget, so a backend restart must not trigger a new one.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 from datetime import timedelta
@@ -251,7 +253,7 @@ class AuthService:
                 return None
             try:
                 return json.loads(self.sealer.open(row.cookies_sealed, context=COOKIE_CONTEXT))
-            except SealError, ValueError:
+            except (SealError, ValueError):
                 log.warning("session.cookies_unreadable")
                 return None
 
@@ -287,6 +289,8 @@ class AuthService:
 
 #: How long BRAIN's settings schema is trusted before it is read again.
 SCHEMA_MAX_AGE = timedelta(hours=1)
+#: How long BRAIN's operator reference catalog is trusted before checking again.
+OPERATORS_MAX_AGE = timedelta(hours=24)
 
 #: The cached schema is keyed by what produced it, not just by what it is.
 #:
@@ -336,14 +340,72 @@ class PlatformMetadata:
             return cached
 
     async def refresh_operators(self) -> list[dict[str, Any]]:
+        """Refreshes and caches operator definitions from BRAIN endpoints."""
         operators = await self.endpoints.list_operators()
-        payload = [o.model_dump(by_alias=True) for o in operators]
-        await self._cache("operators", {"items": payload})
-        return payload
+        valid_items: list[dict[str, Any]] = []
+        for o in operators:
+            d = o.model_dump(by_alias=True) if hasattr(o, "model_dump") else dict(o)
+            name = d.get("name")
+            definition = d.get("definition")
+            if isinstance(name, str) and name.strip() and isinstance(definition, str) and definition.strip():
+                valid_items.append(d)
+        if not valid_items:
+            raise ValueError("No valid operator definitions returned from BRAIN API")
+        await self._cache("operators", {"items": valid_items})
+        return valid_items
 
     async def cached_operators(self) -> list[dict[str, Any]] | None:
         cached = await self._read_cache("operators")
         return cached.get("items") if cached else None
+
+    async def get_operator_catalog(
+        self,
+        scope: str = "REGULAR",
+        *,
+        force_refresh: bool = False,
+    ) -> Any:
+        """Returns the authoritative OperatorCatalog.
+
+        Resolution order:
+        1. If not force_refresh, checks MetadataCache. If present and fresh (< OPERATORS_MAX_AGE),
+           constructs and returns OperatorCatalog(..., source="METADATA_CACHE").
+        2. If force_refresh or cache is missing/expired, attempts live refresh from BRAIN API
+           via list_operators(). If successful, validates, caches, and returns OperatorCatalog(..., source="BRAIN_LIVE").
+        3. If live refresh fails:
+           - If stale/cached operators exist in MetadataCache, preserves and uses them: OperatorCatalog(..., source="METADATA_CACHE").
+           - If no cached operators exist, falls back to built-in definitions: OperatorCatalog(scope=scope, source="BUILTIN_FALLBACK").
+        """
+        from .discovery.catalog import OperatorCatalog
+
+        async with self.db.session() as session:
+            row = await session.get(MetadataCache, "operators")
+            cached_val, fetched_at = (row.value, row.fetched_at) if row else (None, None)
+
+        cached_items = cached_val.get("items") if isinstance(cached_val, dict) else None
+
+        # Re-use cache if not forced and still fresh
+        if (
+            not force_refresh
+            and cached_items
+            and fetched_at is not None
+            and utcnow() - fetched_at < OPERATORS_MAX_AGE
+        ):
+            return OperatorCatalog.from_metadata_cache(cached_items, scope=scope)
+
+        # Attempt live refresh from BRAIN endpoints
+        try:
+            fresh_items = await self.refresh_operators()
+            return OperatorCatalog(operator_defs=fresh_items, scope=scope, source="BRAIN_LIVE")
+        except Exception as exc:
+            log.warning("metadata.operators_refresh_failed", error=str(exc))
+            # Preserve last known valid cache if available
+            if cached_items:
+                log.info("metadata.using_preserved_cached_operators", count=len(cached_items))
+                return OperatorCatalog.from_metadata_cache(cached_items, scope=scope)
+
+        # Fall back to built-in definitions if no usable cache exists
+        log.info("metadata.using_builtin_operator_fallback", scope=scope)
+        return OperatorCatalog(scope=scope, source="BUILTIN_FALLBACK")
 
     async def _cache(self, key: str, value: dict[str, Any]) -> None:
         async with self.db.session() as session:

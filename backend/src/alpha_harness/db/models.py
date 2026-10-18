@@ -12,12 +12,14 @@ the ability to cancel a running simulation, which is the exact failure this proj
 exists to prevent.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -28,6 +30,7 @@ from sqlalchemy import (
     Text,
     TypeDecorator,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -622,6 +625,9 @@ class ResearchStatus(StrEnum):
 
     IDLE = "IDLE"
     RUNNING = "RUNNING"
+    GENERATING = "GENERATING"
+    SIMULATING = "SIMULATING"
+    EVALUATING = "EVALUATING"
     PAUSED = "PAUSED"
     LEARNING = "LEARNING"
     COMPLETE = "COMPLETE"
@@ -636,9 +642,11 @@ class CandidateStatus(StrEnum):
     INVALID = "INVALID"
     QUEUED = "QUEUED"
     SIMULATING = "SIMULATING"
+    UNAVAILABLE = "UNAVAILABLE"
     EVALUATED = "EVALUATED"
     REJECTED = "REJECTED"
     ACCEPTED = "ACCEPTED"
+    GRADUATED = "GRADUATED"
 
 
 class ResearchSession(Base):
@@ -677,9 +685,19 @@ class ResearchSession(Base):
     constraints: Mapped[dict[str, Any] | None] = mapped_column(JSON, server_default="{}")
 
     status: Mapped[str | None] = mapped_column(
-        String(16), default=ResearchStatus.IDLE, server_default="IDLE", index=True
+        String(32), default=ResearchStatus.IDLE, server_default="IDLE", index=True
     )
     message: Mapped[str | None] = mapped_column(Text)
+
+    #: P0-05: Autonomous experiment runner durable checkpointing.
+    #: The current phase within the autonomous loop, persisted so a restart can resume.
+    current_phase: Mapped[str | None] = mapped_column(String(32), server_default="IDLE")
+    #: Candidate IDs generated in the current round, JSON list for crash recovery.
+    current_round_candidate_ids: Mapped[list[int] | None] = mapped_column(JSON, server_default="[]")
+    #: Consecutive unrecoverable errors; reset on every successful phase completion.
+    error_count: Mapped[int | None] = mapped_column(Integer, server_default="0")
+    #: Timestamp of last successful phase checkpoint.
+    last_checkpoint_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow)
@@ -711,6 +729,9 @@ class ResearchResearcher(Base):
     #: The system prompt persona injected before every generation call.
     system_prompt: Mapped[str | None] = mapped_column(Text)
     temperature: Mapped[float | None] = mapped_column(Float, server_default="0.8")
+    #: P1-04: Explicit target dataset and deliberate allocation policy
+    target_dataset_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dataset_allocation_policy: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     #: Running statistics, updated after each evaluation cycle.
     total_generated: Mapped[int | None] = mapped_column(Integer, server_default="0")
@@ -725,6 +746,49 @@ class ResearchResearcher(Base):
     enabled: Mapped[bool | None] = mapped_column(default=True, server_default="1")
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow)
+
+
+class PromptVersion(Base):
+    """Immutable point-in-time snapshot of an LLM alpha generation prompt.
+
+    Append-only: Protected by SQLite triggers rejecting all UPDATE and DELETE operations.
+    Archival origins decouple PromptVersion lifecycle from mutable sessions or strategies.
+    """
+
+    __tablename__ = "prompt_version"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    #: Archival origin identifiers (decoupled, plain indexed integers, no ON DELETE cascades)
+    origin_session_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    origin_strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+    #: Classification & Identity
+    category: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    authoring_source: Mapped[str] = mapped_column(
+        String(32), default="SYSTEM", server_default="SYSTEM"
+    )  #: "SEED", "SYSTEM", "EVOLUTION", "MANUAL"
+
+    #: Canonical Prompt Snapshot Components (Option A)
+    template_text: Mapped[str] = mapped_column(Text, nullable=False)
+    guidance: Mapped[str | None] = mapped_column(Text, nullable=True)
+    examples: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
+    anti_patterns: Mapped[list[Any]] = mapped_column(JSON, default=list, server_default="[]")
+
+    #: Content-Only Cryptographic Integrity Hash (SHA-256)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+
+    #: Lineage (Immutable self-referential lineage protected by RESTRICT)
+    parent_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_version.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_prompt_version_cat_ver", "category", "version"),
+    )
 
 
 class PromptStrategy(Base):
@@ -772,14 +836,74 @@ class PromptStrategy(Base):
     parent_id: Mapped[int | None] = mapped_column(
         ForeignKey("prompt_strategy.id", ondelete="SET NULL")
     )
+    #: P1-03: Immutable snapshot linkage
+    current_prompt_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_version.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
 
     is_active: Mapped[bool | None] = mapped_column(default=True, server_default="1")
+    #: P1-13: Validation status & promotion lifecycle (EXPERIMENTAL, SHADOW_TESTING, PROMOTED, REJECTED, ROLLED_BACK)
+    validation_status: Mapped[str | None] = mapped_column(
+        String(32), default="EXPERIMENTAL", server_default="EXPERIMENTAL"
+    )
+    previous_promoted_strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    previous_promoted_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    promotion_criteria: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    promoted_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    rolled_back_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow)
 
     __table_args__ = (
         Index("ix_prompt_strategy_active", "is_active", "category"),
+        Index("ix_prompt_strategy_status", "validation_status", "category"),
     )
+
+
+class GenerationAttempt(Base):
+    """Durable record of a single LLM generation dispatch attempt.
+
+    Preserves the exact rendered system prompt (including catalog context and operator tables),
+    user prompt, response schema, and model configuration once per researcher dispatch.
+    """
+
+    __tablename__ = "generation_attempt"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("research_session.id", ondelete="CASCADE"), index=True
+    )
+    researcher_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_researcher.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    prompt_strategy_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_strategy.id", ondelete="SET NULL"), nullable=True
+    )
+    #: P1-03: Exact immutable snapshot attribution
+    prompt_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_version.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    #: Resolution tier: EXACT_SESSION, GLOBAL_CATEGORY, SESSION_GENERAL, GLOBAL_GENERAL, TEMPLATE_FALLBACK
+    resolution_tier: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    generation: Mapped[int | None] = mapped_column(Integer, server_default="0")
+    model_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
+    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_schema: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    #: P1-04: Dataset selection context and lineage
+    target_dataset_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    catalog_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dataset_selection_policy: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dataset_selection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: P1-05: Authoritative datafield catalog version and allowed field lineage
+    datafield_catalog_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    allowed_fields: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    #: P1-06: Authoritative operator catalog version
+    operator_catalog_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
 
 
 class ResearchCandidate(Base):
@@ -806,12 +930,18 @@ class ResearchCandidate(Base):
     prompt_strategy_id: Mapped[int | None] = mapped_column(
         ForeignKey("prompt_strategy.id", ondelete="SET NULL")
     )
+    #: P1-03: Exact immutable snapshot attribution
+    prompt_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_version.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     generation: Mapped[int | None] = mapped_column(Integer, server_default="0")
 
     #: The LLM's stated reasoning for this alpha.
     hypothesis: Mapped[str | None] = mapped_column(Text)
-    #: The BRAIN Fast Expression or Python alpha code.
+    #: The WorldQuant BRAIN Fast Expression code. Fast Expression ('FASTEXPR') is the
+    #: sole supported generation language; Python alpha generation is explicitly out of scope.
     expression: Mapped[str | None] = mapped_column(Text)
+    #: Generation/simulation language. Strictly restricted to 'FASTEXPR'.
     language: Mapped[str | None] = mapped_column(String(16), server_default="FASTEXPR")
 
     #: Which datasets and fields the expression references, extracted by the parser.
@@ -838,6 +968,112 @@ class ResearchCandidate(Base):
     sim_neutralization: Mapped[str | None] = mapped_column(String(32))
     sim_decay: Mapped[int | None] = mapped_column(Integer)
     sim_delay: Mapped[int | None] = mapped_column(Integer)
+
+    #: P1-15: Explicit, validated, and persisted simulation settings per candidate
+    simulation_settings: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    settings_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    settings_profile_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    settings_profile_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    settings_schema_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    settings_verification_status: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, server_default="UNVERIFIED", default="UNVERIFIED"
+    )
+    candidate_provenance_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+    @property
+    def is_simulation_settings_complete(self) -> bool:
+        """Returns True only when candidate has complete, verified simulation settings.
+
+        Legacy rows without complete simulation_settings cannot claim complete reproducibility.
+        """
+        if self.simulation_settings is None:
+            return False
+        return self.settings_verification_status not in ("LEGACY_UNVERIFIED", "INVALID")
+
+    def effective_simulation_settings(self) -> dict[str, Any]:
+        """Returns the effective simulation settings.
+
+        For legacy rows with missing complete settings, returns reconstructed partial scalar
+        settings with an explicit legacy_unverified marker; missing values are NOT fabricated.
+        """
+        if self.simulation_settings is not None:
+            return dict(self.simulation_settings)
+        return {
+            "region": self.sim_region,
+            "universe": self.sim_universe,
+            "delay": self.sim_delay,
+            "decay": self.sim_decay,
+            "neutralization": self.sim_neutralization,
+            "is_legacy_unverified": True,
+            "verification_status": "LEGACY_UNVERIFIED",
+        }
+
+    def to_simulation_settings(self) -> Any:
+        """Constructs a SimulationSettings wire object for simulation dispatch."""
+        from ..brain.schemas import SimulationSettings
+
+        if self.simulation_settings:
+            s = self.simulation_settings
+            return SimulationSettings(
+                instrument_type=s.get("instrument_type") or "EQUITY",
+                region=s.get("region") or self.sim_region or "USA",
+                universe=s.get("universe") or self.sim_universe or "TOP3000",
+                delay=int(s.get("delay") if s.get("delay") is not None else (self.sim_delay or 1)),
+                decay=int(s.get("decay") if s.get("decay") is not None else (self.sim_decay or 0)),
+                neutralization=s.get("neutralization") or self.sim_neutralization or "NONE",
+                truncation=float(s.get("truncation", 0.08)),
+                pasteurization=str(s.get("pasteurization", "ON")),
+                unit_handling=str(s.get("unit_handling", "VERIFY")),
+                nan_handling=str(s.get("nan_handling", "OFF")),
+                language=str(s.get("language", "FASTEXPR")),
+                visualization=bool(s.get("visualization", False)),
+                test_period=s.get("test_period"),
+                max_trade=s.get("max_trade"),
+                max_position=s.get("max_position"),
+                simulation_mode=s.get("simulation_mode"),
+                selection_handling=s.get("selection_handling"),
+                selection_limit=s.get("selection_limit"),
+                component_activation=s.get("component_activation"),
+            )
+        return SimulationSettings(
+            instrument_type="EQUITY",
+            region=self.sim_region or "USA",
+            universe=self.sim_universe or "TOP3000",
+            delay=self.sim_delay or 1,
+            decay=self.sim_decay or 0,
+            neutralization=self.sim_neutralization or "NONE",
+            truncation=0.08,
+            pasteurization="ON",
+            unit_handling="VERIFY",
+            nan_handling="OFF",
+            language="FASTEXPR",
+            visualization=False,
+        )
+
+    #: Exact generation-attempt lineage and point-in-time model configuration snapshot
+    generation_attempt_id: Mapped[int | None] = mapped_column(
+        ForeignKey("generation_attempt.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    model_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raw_expression: Mapped[str | None] = mapped_column(Text, nullable=True)
+    repair_history: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    #: P1-04: Selected target dataset and catalog provenance (distinguished from datasets_used)
+    target_dataset_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    catalog_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dataset_selection_policy: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dataset_selection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: P1-05: Datafield catalog version and field families
+    datafield_catalog_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    field_families: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    #: P1-06: Authoritative operator catalog version and operators used
+    operator_catalog_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    operators_used: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+
+    #: P1-14: Deterministic deduplication, AST skeleton fingerprint, and pruning reason
+    expression_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    ast_skeleton: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pruning_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     status: Mapped[str | None] = mapped_column(
         String(16), default=CandidateStatus.DRAFT, server_default="DRAFT", index=True
@@ -904,7 +1140,95 @@ class ResearchEvaluation(Base):
     checks_passed: Mapped[int | None] = mapped_column(Integer)
     checks_total: Mapped[int | None] = mapped_column(Integer)
 
+    #: Provenance and verification: strictly True only when evaluated against genuine BRAIN vault series.
+    is_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), index=True)
+    provenance: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    #: Exact quantitative evaluation parameters used to compute metrics
+    cost_bps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    split_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    #: P0-03: Evaluation methodology scheme and 3-way chronological partitions
+    evaluation_scheme: Mapped[str] = mapped_column(String(32), default="SPLIT_3WAY_DEV", server_default="LEGACY_2WAY")
+    is_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    val_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    #: Pure Validation partition metrics (selection and tuning)
+    val_sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    val_fitness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    val_turnover: Mapped[float | None] = mapped_column(Float, nullable=True)
+    val_returns: Mapped[float | None] = mapped_column(Float, nullable=True)
+    val_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    val_after_cost_sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    val_composite_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    #: Diagnostic only (IS-vs-Validation decay; strictly excluded from selection score)
+    is_val_decay: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    #: Final Holdout partition metrics (strictly uncomputed/NULL until explicit graduation)
+    holdout_sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holdout_fitness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holdout_turnover: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holdout_returns: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holdout_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holdout_after_cost_sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holdout_evaluated_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+    #: Frozen configuration fingerprint
+    config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    canonical_spec: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
     evaluated_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=utcnow)
+
+
+class HoldoutAssessment(Base):
+    """Immutable persistent registry of consumed and revealed market holdout windows.
+
+    Guarantees that once a market holdout period is unsealed anywhere in the research program,
+    it cannot be reused as an untouched final holdout by another candidate or session.
+    """
+
+    __tablename__ = "holdout_assessment"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+
+    #: Assessment classification: "FINAL_ASSESSMENT", "LEGACY_CONTAMINATED", or "LEGACY_CONTAMINATED_UNKNOWN"
+    assessment_type: Mapped[str] = mapped_column(String(32), default="FINAL_ASSESSMENT", nullable=False)
+
+    #: Exact temporal boundaries of the consumed holdout window (NULL if unknown legacy)
+    holdout_start_date: Mapped[date | None] = mapped_column(Date, index=True, nullable=True)
+    holdout_end_date: Mapped[date | None] = mapped_column(Date, index=True, nullable=True)
+    observation_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    #: Provenance and linkage
+    market_scope: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    candidate_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_candidate.id", ondelete="RESTRICT"),
+        unique=True,
+        nullable=True,
+    )
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_session.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    alpha_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    #: Frozen configuration fingerprint (populated strictly for FINAL_ASSESSMENT)
+    config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    canonical_spec: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    #: Unsealed performance metrics (NULL for legacy contaminated records)
+    holdout_sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holdout_fitness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holdout_turnover: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holdout_returns: Mapped[float | None] = mapped_column(Float, nullable=True)
+    holdout_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    evaluated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_holdout_dates", "holdout_start_date", "holdout_end_date"),
+    )
 
 
 class ResearchRobustness(Base):
@@ -947,6 +1271,54 @@ class ResearchRobustness(Base):
     message: Mapped[str | None] = mapped_column(Text)
     tested_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=utcnow)
 
+    # Execution status: PENDING, RUNNING, COMPLETED, NOT_RUN, UNSUPPORTED, FAILED
+    status: Mapped[str] = mapped_column(
+        String(32), default="COMPLETED", server_default=text("'COMPLETED'")
+    )
+    # Result kind: GENUINE, LEGACY_SYNTHETIC
+    result_kind: Mapped[str] = mapped_column(
+        String(32), default="GENUINE", server_default=text("'GENUINE'")
+    )
+    # Explicit flag indicating whether record was generated by synthetic simulation/approximation
+    is_synthetic: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0")
+    )
+
+    # Provenance linkage
+    baseline_eval_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_evaluation.id", ondelete="SET NULL"), nullable=True
+    )
+    brain_simulation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    perturbed_alpha_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    perturbation_config: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    val_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    val_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    # Execution status: PENDING, RUNNING, COMPLETED, NOT_RUN, UNSUPPORTED, FAILED
+    status: Mapped[str] = mapped_column(
+        String(32), default="COMPLETED", server_default=text("'COMPLETED'")
+    )
+    # Result kind: GENUINE, LEGACY_SYNTHETIC
+    result_kind: Mapped[str] = mapped_column(
+        String(32), default="GENUINE", server_default=text("'GENUINE'")
+    )
+    # Explicit flag indicating whether record was generated by synthetic simulation/approximation
+    is_synthetic: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0")
+    )
+
+    # Provenance linkage
+    baseline_eval_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_evaluation.id", ondelete="SET NULL"), nullable=True
+    )
+    brain_simulation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    perturbed_alpha_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    perturbation_config: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    val_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    val_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
     __table_args__ = (
         Index("ix_robustness_candidate_type", "candidate_id", "test_type"),
     )
@@ -982,13 +1354,25 @@ class ResearchInsight(Base):
     #: Supporting evidence: expression snippets, metric ranges, etc.
     evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, server_default="{}")
 
-    #: Which researcher or prompt produced the batch this insight came from.
+    #: Which researcher or prompt produced the batch this insight came from (antecedent strategy).
     researcher_id: Mapped[int | None] = mapped_column(
         ForeignKey("research_researcher.id", ondelete="SET NULL")
     )
     prompt_strategy_id: Mapped[int | None] = mapped_column(
         ForeignKey("prompt_strategy.id", ondelete="SET NULL")
     )
+    #: Resulting strategy evolved from this insight cycle.
+    evolved_strategy_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_strategy.id", ondelete="SET NULL"), nullable=True
+    )
+
+    #: P1-01 Reflection metadata & execution tracking
+    model_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    execution_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    is_fallback: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    evidence_candidate_ids: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
+    structured_output: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error_details: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     #: Batch-level statistics at the time of this insight.
     batch_size: Mapped[int | None] = mapped_column(Integer)
@@ -1034,3 +1418,219 @@ class LeaderboardSnapshot(Base):
     __table_args__ = (
         Index("ix_leaderboard_session_dim", "session_id", "dimension"),
     )
+
+
+class DatasetAllocationState(Base):
+    """Persisted allocation sequence tracking for autonomous dataset exploration.
+
+    Guarantees balanced, non-starving dataset exploration across process restarts
+    and concurrent researchers without relying on volatile in-memory counters.
+    """
+
+    __tablename__ = "dataset_allocation_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+    scope_key: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    allocation_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    last_dataset_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "scope_key", name="uq_dataset_alloc_session_scope"),
+        Index("ix_dataset_alloc_session_scope", "session_id", "scope_key"),
+    )
+
+
+class OperatorEfficacyRecord(Base):
+    """P1-09: Persisted controlled operator attribution and shrinkage efficacy record.
+
+    Stores deconfounded, shrinkage-regularized statistical efficacy metrics for Fast Expression
+    operators across research cohorts, supporting empirical prompt evolution and learning loops.
+    """
+
+    __tablename__ = "operator_efficacy_record"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_session.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    operator_name: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+    sample_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    winner_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    loser_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+
+    raw_avg_sharpe: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0", nullable=False)
+    baseline_sharpe: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0", nullable=False)
+    observed_lift: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0", nullable=False)
+    marginal_lift: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0", nullable=False)
+    shrunk_lift: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0", nullable=False)
+
+    std_error: Mapped[float] = mapped_column(Float, default=0.0, server_default="0.0", nullable=False)
+    t_stat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lower_confidence_bound: Mapped[float | None] = mapped_column(Float, nullable=True)
+    upper_confidence_bound: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    confidence_level: Mapped[str] = mapped_column(
+        String(32), default="INSUFFICIENT_SAMPLE", server_default="INSUFFICIENT_SAMPLE", nullable=False
+    )
+    evidence_status: Mapped[str] = mapped_column(
+        String(32), default="INCONCLUSIVE", server_default="INCONCLUSIVE", nullable=False
+    )
+
+    method_version: Mapped[str] = mapped_column(String(32), default="p1_09_v1", server_default="p1_09_v1", nullable=False)
+    provenance: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    evaluation_window: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    co_occurring_operators: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_op_eff_session_cat_op", "session_id", "category", "operator_name"),
+    )
+
+
+class ResearchEpisode(Base):
+    """P1-12: Persistent, structured researcher-specific episodic memory.
+
+    Stores detailed experiment records (hypotheses, candidate expressions, execution/simulation
+    funnel stage, non-holdout validation metrics, statistical evidence, failure categories, and lessons)
+    scoped strictly to an individual researcher persona or promoted to shared knowledge.
+    """
+
+    __tablename__ = "research_episode"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("research_session.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    researcher_id: Mapped[int] = mapped_column(
+        ForeignKey("research_researcher.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    candidate_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_candidate.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    prompt_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_version.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+
+    # Context & Environment Metadata
+    generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    strategy_focus: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    dataset_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    universe: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    delay: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    neutralization: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decay: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    hypothesis_family: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    hypothesis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expression: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expression_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+    # Execution & Lifecycle
+    funnel_stage: Mapped[str] = mapped_column(
+        String(32), default="GENERATED", server_default="GENERATED", nullable=False
+    )  # GENERATED, AST_VALID, PREFLIGHT_VALID, SIMULATED, EVALUATED
+    outcome: Mapped[str] = mapped_column(
+        String(32), default="PENDING", server_default="PENDING", nullable=False
+    )  # STATISTICAL_WINNER, STATISTICAL_LOSER, PROVISIONAL, SYNTAX_ERROR, PREFLIGHT_ERROR, SIMULATION_ERROR, UNTESTED
+    selection_tier: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    provenance: Mapped[str | None] = mapped_column(String(32), default="LOCAL_PROXY", nullable=True)
+    brain_simulation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # Non-holdout Validation Performance & Sample Info (P0-03 Holdout Isolation)
+    # Strictly in-sample and validation metrics only. NEVER holdout metrics.
+    validation_sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    validation_fitness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    validation_turnover: Mapped[float | None] = mapped_column(Float, nullable=True)
+    validation_decay: Mapped[float | None] = mapped_column(Float, nullable=True)
+    in_sample_sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    t_years: Mapped[float | None] = mapped_column(Float, nullable=True)
+    val_observations: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Statistical Evidence
+    sharpe_se: Mapped[float | None] = mapped_column(Float, nullable=True)
+    t_stat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lcb95: Mapped[float | None] = mapped_column(Float, nullable=True)
+    z_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fdr_q_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_statistically_significant: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False
+    )
+
+    # Failure Classification & Diagnostic Learning
+    failure_category: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )  # None, "SYNTAX", "OPERATOR_TYPE", "PREFLIGHT", "SIMULATION_EXECUTION", "NEGATIVE_SHARPE", "HIGH_TURNOVER", "SEVERE_DECAY"
+    error_details: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    lessons_learned: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Versioning & Lineage
+    catalog_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    method_version: Mapped[str] = mapped_column(
+        String(32), default="p1_12_v1", server_default="p1_12_v1", nullable=False
+    )
+
+    # Privacy & Knowledge Sharing Boundary
+    is_shared_knowledge: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", nullable=False, index=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_res_ep_researcher_gen", "researcher_id", "generation"),
+        Index("ix_res_ep_res_outcome", "researcher_id", "outcome"),
+        Index("ix_res_ep_shared", "is_shared_knowledge", "session_id"),
+        Index("ix_res_ep_expr_hash", "researcher_id", "expression_hash"),
+    )
+
+
+class PromptLifecycleEvent(Base):
+    """P1-13: Immutable audit log of prompt lifecycle events and promotion decisions."""
+
+    __tablename__ = "prompt_lifecycle_event"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+    category: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    strategy_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    prompt_version_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+    target_strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    event_type: Mapped[str] = mapped_column(
+        String(32), index=True, nullable=False
+    )  # "CREATED_EXPERIMENTAL", "BENCHMARKED", "PROMOTED", "REJECTED", "ROLLED_BACK"
+    from_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    # Statistical Evaluation Evidence (P0-03: Strictly validation partition data)
+    delta_sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    delta_se: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lcb95_delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    non_inferiority_margin: Mapped[float | None] = mapped_column(Float, nullable=True)
+    non_inferiority_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    ast_valid_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    token_usage_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sample_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        Index("ix_prompt_life_sess_cat", "session_id", "category"),
+        Index("ix_prompt_life_event_time", "event_type", "created_at"),
+    )
+

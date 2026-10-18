@@ -22,6 +22,8 @@ candidate is correlated against TOP500 and TOP2000 members alike, and a USA **D0
 against the USA D1 pool. Delay and universe are not part of the bucket.
 """
 
+from __future__ import annotations
+
 from bisect import bisect_left
 from typing import TYPE_CHECKING, Any
 

@@ -10,6 +10,8 @@ The captcha is required on sign-in, and repeated failures lock the account, so s
 is never attempted speculatively.
 """
 
+from __future__ import annotations
+
 import asyncio
 import time
 from dataclasses import dataclass, field

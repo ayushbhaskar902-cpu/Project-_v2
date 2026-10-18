@@ -5,6 +5,8 @@ shape. A tree's FIELD tags share one field pool, and its other variables, choice
 neutralization are asked of the search exactly as they were when the task was added.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 

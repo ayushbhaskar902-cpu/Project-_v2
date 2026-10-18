@@ -8,6 +8,8 @@ Neither simulates on its own: previews only read, and queueing hands work to the
 like any lab.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 from typing import Any, Literal, Self

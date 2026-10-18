@@ -8,6 +8,8 @@ dicts: bulk reads where validating every row costs too much (``list_data_fields_
 open-ended or undocumented blobs the callers read selectively.
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, Any
 
 import structlog

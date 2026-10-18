@@ -5,6 +5,8 @@ signals submitted in the quarter, and pyramids formulated in it. The third, comb
 performance, is BRAIN's own arithmetic and is not guessed at.
 """
 
+from __future__ import annotations
+
 import asyncio
 from datetime import UTC, datetime, timedelta
 

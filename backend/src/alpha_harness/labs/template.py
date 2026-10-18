@@ -11,6 +11,8 @@ added. The search then asks, define-by-run: the universe, every variable in the 
 first written, the neutralization and the investability constraint.
 """
 
+from __future__ import annotations
+
 import functools
 import math
 import operator
@@ -293,7 +295,7 @@ def fold(node: Node) -> Node:
         return node
     try:
         result = _ARITHMETIC[node.value](left, right)
-    except ZeroDivisionError, OverflowError:
+    except (ZeroDivisionError, OverflowError):
         return node
     # A negative number to a fractional power is complex, and nothing BRAIN can read.
     if not isinstance(result, float) or not math.isfinite(result):

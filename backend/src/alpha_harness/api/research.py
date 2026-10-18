@@ -18,11 +18,12 @@ from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import case, desc, func, select, update
 
 from ..db.models import (
     CandidateStatus,
+    GenerationAttempt,
     LeaderboardSnapshot,
     PromptStrategy,
     ResearchCandidate,
@@ -33,8 +34,17 @@ from ..db.models import (
     ResearchStatus,
     utcnow,
 )
+from ..evaluation import (
+    HoldoutChronologyError,
+    HoldoutImmutabilityError,
+    HoldoutIndeterminacyError,
+    HoldoutOverlapError,
+    InsufficientDataError,
+)
+from ..experiment import ExperimentRunner
 from ..orchestrator.researchers import DEFAULT_RESEARCHER_ROSTER, ResearcherConfig
 from ..prompts.library import StrategyCategory
+from ..realtime import TOPIC_SESSION
 from ..schemas import Out
 from .deps import State, refuse
 import structlog
@@ -63,6 +73,13 @@ class CreateSessionIn(BaseModel):
         "deepseek:deepseek-chat",
     ])
     constraints: dict[str, Any] = Field(default_factory=dict)
+    language: str | None = Field(default="FASTEXPR", description="Target alpha language. Strictly restricted to FASTEXPR.")
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _validate_language(cls, v: Any) -> str:
+        from ..generator.pipeline import validate_alpha_language
+        return validate_alpha_language(v)
 
 
 class SessionSummaryOut(Out):
@@ -99,24 +116,72 @@ class ResearcherOut(Out):
 
 class CandidateOut(Out):
     id: int
-    session_id: int | None
-    researcher_id: int | None
-    generation: int | None
-    hypothesis: str | None
-    expression: str | None
-    operator_count: int | None
-    field_count: int | None
-    is_valid: bool | None
-    validation_error: str | None
-    retry_count: int | None
-    status: str | None
-    full_sharpe: float | None
-    after_cost_sharpe: float | None
-    oos_sharpe: float | None
-    sharpe_decay: float | None
-    composite_score: float | None
-    is_submission_grade: bool | None
-    created_at: datetime | None
+    session_id: int | None = None
+    researcher_id: int | None = None
+    generation_attempt_id: int | None = None
+    generation: int | None = 0
+    hypothesis: str | None = None
+    expression: str | None = None
+    language: str = Field(default="FASTEXPR", description="Target alpha language (FASTEXPR).")
+    operator_count: int | None = 0
+    field_count: int | None = 0
+    is_valid: bool | None = True
+    validation_error: str | None = None
+    retry_count: int | None = 0
+    status: str | None = "DRAFT"
+    full_sharpe: float | None = None
+    after_cost_sharpe: float | None = None
+    oos_sharpe: float | None = None
+    sharpe_decay: float | None = None
+    composite_score: float | None = None
+    is_submission_grade: bool | None = False
+    alpha_id: str | None = None
+    simulation_record_id: int | None = None
+    prompt_strategy_id: int | None = None
+    model_ref: str | None = None
+    temperature: float | None = None
+    datasets_used: list[str] = Field(default_factory=list)
+    fields_used: list[str] = Field(default_factory=list)
+    raw_expression: str | None = None
+    is_verified: bool | None = Field(
+        default=None,
+        description="True if evaluation verified against real BRAIN series; False if unverified; None if unevaluated."
+    )
+    evaluation_provenance: str | None = Field(
+        default=None,
+        description="Source provenance of the evaluation (e.g. 'BRAIN_VAULT'). None if unevaluated."
+    )
+    evaluation_scheme: str | None = None
+    is_graduated: bool = False
+    val_composite_score: float | None = None
+    val_sharpe: float | None = None
+    val_after_cost_sharpe: float | None = None
+    val_fitness: float | None = None
+    val_turnover: float | None = None
+    is_val_decay: float | None = None
+    holdout_sharpe: float | None = None
+    holdout_after_cost_sharpe: float | None = None
+    holdout_fitness: float | None = None
+    simulation_settings: dict[str, Any] | None = None
+    settings_hash: str | None = None
+    settings_verification_status: str | None = None
+    candidate_provenance_hash: str | None = None
+    created_at: datetime | None = None
+
+
+class GenerationAttemptOut(Out):
+    id: int
+    session_id: int
+    researcher_id: int | None = None
+    prompt_strategy_id: int | None = None
+    resolution_tier: str | None = None
+    generation: int | None = 0
+    model_ref: str | None = None
+    temperature: float | None = None
+    system_prompt: str | None = None
+    user_prompt: str | None = None
+    response_schema: dict[str, Any] | None = None
+    created_at: datetime | None = None
 
 
 class UpdateResearcherIn(BaseModel):
@@ -133,6 +198,13 @@ class EnqueueCandidatesIn(BaseModel):
 
 class TriggerGenerationIn(BaseModel):
     total_candidates: int = 80
+    language: str | None = Field(default="FASTEXPR", description="Target alpha language. Strictly restricted to FASTEXPR.")
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _validate_language(cls, v: Any) -> str:
+        from ..generator.pipeline import validate_alpha_language
+        return validate_alpha_language(v)
 
 
 class CuratePoolIn(BaseModel):
@@ -168,7 +240,7 @@ async def list_sessions(state: State) -> list[SessionSummaryOut]:
             # Best Sharpe and submission grade count
             e_stmt = (
                 select(
-                    func.max(ResearchEvaluation.full_sharpe),
+                    func.max(func.coalesce(ResearchEvaluation.val_sharpe, ResearchEvaluation.full_sharpe)),
                     func.sum(
                         case(
                             (
@@ -183,7 +255,15 @@ async def list_sessions(state: State) -> list[SessionSummaryOut]:
                     ResearchCandidate,
                     ResearchCandidate.id == ResearchEvaluation.candidate_id,
                 )
-                .where(ResearchCandidate.session_id == s.id)
+                .where(
+                    ResearchCandidate.session_id == s.id,
+                    ResearchEvaluation.is_verified.is_(True),
+                    ResearchCandidate.status.in_([
+                        CandidateStatus.EVALUATED,
+                        CandidateStatus.ACCEPTED,
+                        CandidateStatus.GRADUATED,
+                    ]),
+                )
             )
             e_res = await session.execute(e_stmt)
             max_s, sub_c = e_res.one()
@@ -342,6 +422,141 @@ async def trigger_generation_round(
     }
 
 
+@router.post("/sessions/{session_id}/run")
+async def run_experiment_session(session_id: int, state: State) -> dict[str, Any]:
+    """Starts the autonomous experiment loop for a research session."""
+    runner = state.experiments.get(session_id)
+    if runner is None:
+        runner = ExperimentRunner(
+            session_id=session_id,
+            db=state.db,
+            orchestrator=state.orchestrator,
+            evaluation=state.evaluation,
+            learning=state.learning,
+            leaderboard=state.leaderboard,
+            engine=getattr(state, "engine", None),
+            on_phase_change=lambda data: state.hub.broadcast(TOPIC_SESSION, data),
+        )
+        state.experiments.register(runner)
+
+    try:
+        await runner.start()
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {
+        "status": "started",
+        "sessionId": session_id,
+        "message": "Autonomous experiment loop started.",
+    }
+
+
+@router.post("/sessions/{session_id}/pause")
+async def pause_experiment_session(session_id: int, state: State) -> dict[str, Any]:
+    """Pauses the autonomous experiment loop at the next phase boundary."""
+    runner = state.experiments.get(session_id)
+    if runner is None or not runner.is_running:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Session {session_id} does not have an actively running experiment loop to pause.",
+        )
+
+    await runner.pause()
+    return {
+        "status": "pause_requested",
+        "sessionId": session_id,
+        "message": "Pause requested; experiment will pause at the next phase boundary.",
+    }
+
+
+@router.post("/sessions/{session_id}/resume")
+async def resume_experiment_session(session_id: int, state: State) -> dict[str, Any]:
+    """Resumes an autonomous experiment loop that was paused or interrupted."""
+    runner = state.experiments.get(session_id)
+    if runner is None:
+        runner = ExperimentRunner(
+            session_id=session_id,
+            db=state.db,
+            orchestrator=state.orchestrator,
+            evaluation=state.evaluation,
+            learning=state.learning,
+            leaderboard=state.leaderboard,
+            engine=getattr(state, "engine", None),
+            on_phase_change=lambda data: state.hub.broadcast(TOPIC_SESSION, data),
+        )
+        state.experiments.register(runner)
+
+    try:
+        await runner.resume()
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {
+        "status": "resumed",
+        "sessionId": session_id,
+        "message": "Autonomous experiment loop resumed.",
+    }
+
+
+@router.post("/sessions/{session_id}/cancel")
+async def cancel_experiment_session(session_id: int, state: State) -> dict[str, Any]:
+    """Cancels an autonomous experiment loop immediately."""
+    runner = state.experiments.get(session_id)
+    if runner is not None:
+        await runner.cancel()
+        state.experiments.unregister(session_id)
+    else:
+        async with state.db.session() as session:
+            sess_row = await session.get(ResearchSession, session_id)
+            if sess_row is None:
+                raise HTTPException(status_code=404, detail=f"ResearchSession {session_id} not found")
+            sess_row.status = ResearchStatus.FAILED
+            sess_row.current_phase = ResearchStatus.FAILED
+            sess_row.message = "Experiment cancelled by user."
+            sess_row.finished_at = utcnow()
+            await session.commit()
+
+    return {
+        "status": "cancelled",
+        "sessionId": session_id,
+        "message": "Autonomous experiment loop cancelled.",
+    }
+
+
+@router.get("/sessions/{session_id}/status")
+async def get_experiment_session_status(session_id: int, state: State) -> dict[str, Any]:
+    """Returns the current autonomous experiment lifecycle status for a session."""
+    runner = state.experiments.get(session_id)
+    if runner is not None:
+        return await runner.status()
+
+    async with state.db.session() as session:
+        sess_row = await session.get(ResearchSession, session_id)
+        if sess_row is None:
+            raise HTTPException(status_code=404, detail=f"ResearchSession {session_id} not found")
+
+        return {
+            "sessionId": sess_row.id,
+            "status": sess_row.status,
+            "currentPhase": sess_row.current_phase,
+            "currentGeneration": sess_row.current_generation,
+            "simulationBudget": sess_row.simulation_budget,
+            "simulationsUsed": sess_row.simulations_used,
+            "errorCount": sess_row.error_count or 0,
+            "message": sess_row.message,
+            "isRunning": False,
+            "lastCheckpointAt": (
+                sess_row.last_checkpoint_at.isoformat()
+                if sess_row.last_checkpoint_at
+                else None
+            ),
+        }
+
+
 @router.get("/sessions/{session_id}/candidates", response_model=list[CandidateOut])
 async def list_candidates(
     session_id: int,
@@ -372,11 +587,41 @@ async def list_candidates(
 
         results: list[CandidateOut] = []
         for cand, ev in rows:
+            is_3way = ev is not None and ev.evaluation_scheme in ("THREE_WAY_CHRONOLOGICAL", "SPLIT_3WAY_FINAL")
+            is_grad = (cand.status == CandidateStatus.GRADUATED)
+
+            c_score = (
+                ev.val_composite_score
+                if (is_3way and ev.val_composite_score is not None)
+                else (ev.composite_score if ev else None)
+            )
+            ac_sharpe = (
+                ev.val_after_cost_sharpe
+                if (is_3way and ev.val_after_cost_sharpe is not None)
+                else (ev.after_cost_sharpe if ev else None)
+            )
+            oos_s = (
+                ev.val_sharpe
+                if (is_3way and ev.val_sharpe is not None)
+                else (ev.oos_sharpe if ev else None)
+            )
+            decay_s = (
+                ev.is_val_decay
+                if (is_3way and ev.is_val_decay is not None)
+                else (ev.sharpe_decay if ev else None)
+            )
+
+            # Holdout metrics are revealed ONLY if candidate is graduated
+            h_sharpe = ev.holdout_sharpe if (is_grad and ev) else None
+            h_ac_sharpe = ev.holdout_after_cost_sharpe if (is_grad and ev) else None
+            h_fitness = ev.holdout_fitness if (is_grad and ev) else None
+
             results.append(
                 CandidateOut(
                     id=cand.id,
                     session_id=cand.session_id,
                     researcher_id=cand.researcher_id,
+                    generation_attempt_id=cand.generation_attempt_id,
                     generation=cand.generation,
                     hypothesis=cand.hypothesis,
                     expression=cand.expression,
@@ -386,17 +631,74 @@ async def list_candidates(
                     validation_error=cand.validation_error,
                     retry_count=cand.retry_count,
                     status=cand.status,
-                    full_sharpe=round(float(ev.full_sharpe), 2) if ev and ev.full_sharpe is not None else None,
-                    after_cost_sharpe=round(float(ev.after_cost_sharpe), 2) if ev and ev.after_cost_sharpe is not None else None,
-                    oos_sharpe=round(float(ev.oos_sharpe), 2) if ev and ev.oos_sharpe is not None else None,
-                    sharpe_decay=round(float(ev.sharpe_decay), 2) if ev and ev.sharpe_decay is not None else None,
-                    composite_score=round(float(ev.composite_score), 3) if ev and ev.composite_score is not None else None,
-                    is_submission_grade=(ev.checks_passed == ev.checks_total and ev.checks_total > 0) if ev else False,
+                    full_sharpe=round(float(ev.full_sharpe), 2) if ev and ev.is_verified and ev.full_sharpe is not None else None,
+                    after_cost_sharpe=round(float(ac_sharpe), 2) if ac_sharpe is not None else None,
+                    oos_sharpe=round(float(oos_s), 2) if oos_s is not None else None,
+                    sharpe_decay=round(float(decay_s), 2) if decay_s is not None else None,
+                    composite_score=round(float(c_score), 3) if c_score is not None else None,
+                    is_submission_grade=((ev.checks_total or 0) > 0 and ev.checks_passed == ev.checks_total) if (ev and ev.is_verified) else False,
+                    alpha_id=cand.alpha_id,
+                    simulation_record_id=cand.simulation_record_id,
+                    prompt_strategy_id=cand.prompt_strategy_id,
+                    model_ref=cand.model_ref,
+                    temperature=cand.temperature,
+                    datasets_used=cand.datasets_used or [],
+                    fields_used=cand.fields_used or [],
+                    raw_expression=cand.raw_expression,
+                    is_verified=(bool(ev.is_verified) if ev is not None else None),
+                    evaluation_provenance=(ev.provenance if ev is not None else None),
+                    evaluation_scheme=(ev.evaluation_scheme if ev is not None else None),
+                    is_graduated=is_grad,
+                    val_composite_score=round(float(ev.val_composite_score), 3) if ev and ev.val_composite_score is not None else None,
+                    val_sharpe=round(float(ev.val_sharpe), 2) if ev and ev.val_sharpe is not None else None,
+                    val_after_cost_sharpe=round(float(ev.val_after_cost_sharpe), 2) if ev and ev.val_after_cost_sharpe is not None else None,
+                    val_fitness=round(float(ev.val_fitness), 2) if ev and ev.val_fitness is not None else None,
+                    val_turnover=round(float(ev.val_turnover), 3) if ev and ev.val_turnover is not None else None,
+                    is_val_decay=round(float(ev.is_val_decay), 2) if ev and ev.is_val_decay is not None else None,
+                    holdout_sharpe=round(float(h_sharpe), 2) if h_sharpe is not None else None,
+                    holdout_after_cost_sharpe=round(float(h_ac_sharpe), 2) if h_ac_sharpe is not None else None,
+                    holdout_fitness=round(float(h_fitness), 2) if h_fitness is not None else None,
+                    simulation_settings=cand.simulation_settings,
+                    settings_hash=cand.settings_hash,
+                    settings_verification_status=cand.settings_verification_status,
+                    candidate_provenance_hash=cand.candidate_provenance_hash,
                     created_at=cand.created_at,
                 )
             )
 
         return results
+
+
+@router.get("/sessions/{session_id}/generation-attempts/{attempt_id}", response_model=GenerationAttemptOut)
+async def get_generation_attempt(session_id: int, attempt_id: int, state: State) -> GenerationAttemptOut:
+    """Retrieves full generation attempt context including prompt, schema, and catalog context."""
+    async with state.db.session() as session:
+        stmt = select(GenerationAttempt).where(
+            GenerationAttempt.id == attempt_id,
+            GenerationAttempt.session_id == session_id,
+        )
+        res = await session.execute(stmt)
+        attempt = res.scalar_one_or_none()
+        if not attempt:
+            raise refuse(
+                404,
+                "generation_attempt_not_found",
+                f"Generation attempt {attempt_id} was not found in session {session_id}.",
+            )
+        return GenerationAttemptOut(
+            id=attempt.id,
+            session_id=attempt.session_id,
+            researcher_id=attempt.researcher_id,
+            prompt_strategy_id=attempt.prompt_strategy_id,
+            resolution_tier=attempt.resolution_tier,
+            generation=attempt.generation or 0,
+            model_ref=attempt.model_ref,
+            temperature=attempt.temperature,
+            system_prompt=attempt.system_prompt,
+            user_prompt=attempt.user_prompt,
+            response_schema=attempt.response_schema,
+            created_at=attempt.created_at,
+        )
 
 
 # --- Evaluation & Robustness (Phase 5 & 6) --------------------------------
@@ -444,6 +746,7 @@ async def evaluate_session_candidates(
                     CandidateStatus.QUEUED,
                     CandidateStatus.VALID,
                     CandidateStatus.EVALUATED,
+                    CandidateStatus.UNAVAILABLE,
                 ])
             )
 
@@ -485,59 +788,11 @@ async def evaluate_session_candidates(
             except Exception as exc:
                 log.warning("research.fetch_returns_failed", alpha_id=cand.alpha_id, error=str(exc))
 
-        # Retrieve real daily series from vault
-        dates_list: list[date] = []
-        pnl_series: list[float] = []
-        turnover_series: list[float] = []
-
-        series_dict = await state.alphas.series([cand.alpha_id])
-        alpha_series = series_dict.get(cand.alpha_id, {})
-        if alpha_series:
-            dates_list = sorted(alpha_series.keys())
-            pnl_series = [alpha_series[d][0] for d in dates_list]
-            turnover_series = [alpha_series[d][1] for d in dates_list]
-        else:
-            pnl_rows = await state.alphas.pnl_series(cand.alpha_id)
-            if pnl_rows:
-                dates_list = [r["date"] for r in pnl_rows]
-                pnl_series = [float(r["pnl"] or 0.0) for r in pnl_rows]
-                turnover_series = [0.15] * len(pnl_series)
-
-        # Fallback to alpha summary record if daily series could not be fetched
-        if len(dates_list) < 20:
-            alpha_meta = (await state.alphas.by_ids([cand.alpha_id])).get(cand.alpha_id, {})
-            if alpha_meta and alpha_meta.get("sharpe") is not None:
-                num_days = 2500
-                base_date = date(2014, 1, 2)
-                d = base_date
-                for _ in range(num_days):
-                    while d.weekday() >= 5:
-                        d += timedelta(days=1)
-                    dates_list.append(d)
-                    d += timedelta(days=1)
-                real_sharpe = float(alpha_meta["sharpe"])
-                real_turnover = float(alpha_meta.get("turnover") or 0.15)
-                daily_mu = (real_sharpe / math.sqrt(250)) * 2000.0
-                daily_vol = 2000.0
-                import random
-                random.seed(hash(cand.alpha_id))
-                pnl_series = [daily_mu + random.gauss(0, daily_vol) for _ in range(num_days)]
-                turnover_series = [real_turnover] * num_days
-
-        if len(dates_list) >= 20:
+        try:
             scorecard = await state.evaluation.evaluate_candidate(
                 candidate_id=cand.id,
-                dates=dates_list,
-                pnl_series=pnl_series,
-                turnover_series=turnover_series,
                 cost_bps=payload.cost_bps,
             )
-
-            async with state.db.session() as session:
-                cand_row = await session.get(ResearchCandidate, cand.id)
-                if cand_row:
-                    cand_row.status = CandidateStatus.EVALUATED
-                    await session.commit()
 
             if scorecard.is_submission_grade:
                 submission_count += 1
@@ -555,12 +810,30 @@ async def evaluate_session_candidates(
                 "checksPassed": scorecard.checks_passed,
                 "checksTotal": scorecard.checks_total,
                 "realBrainData": True,
+                "status": "EVALUATED",
+            })
+        except InsufficientDataError:
+            # Daily PnL/turnover series is missing, unverified, or incomplete (<20 observations).
+            # Candidate transitions to UNAVAILABLE so it can be safely retried once backfilled.
+            # No ResearchEvaluation record is written, and any existing evaluation is preserved.
+            async with state.db.session() as session:
+                cand_row = await session.get(ResearchCandidate, cand.id)
+                if cand_row:
+                    cand_row.status = CandidateStatus.UNAVAILABLE
+                    await session.commit()
+
+            scorecards.append({
+                "candidateId": cand.id,
+                "alphaId": cand.alpha_id,
+                "status": "UNAVAILABLE",
+                "message": "Daily PnL/turnover series unavailable from BRAIN vault. Eligible for retry.",
+                "realBrainData": False,
             })
 
     return {
         "status": "success",
         "sessionId": session_id,
-        "evaluatedCount": len(scorecards),
+        "evaluatedCount": len([s for s in scorecards if s.get("realBrainData")]),
         "submissionGradeCount": submission_count,
         "pendingSimulations": len(pending),
         "scorecards": scorecards,
@@ -582,44 +855,126 @@ async def list_evaluations(
                 ResearchEvaluation,
                 ResearchEvaluation.candidate_id == ResearchCandidate.id,
             )
-            .where(ResearchCandidate.session_id == session_id)
+            .where(
+                ResearchCandidate.session_id == session_id,
+                ResearchEvaluation.is_verified.is_(True),
+                ResearchCandidate.status.in_([
+                    CandidateStatus.EVALUATED,
+                    CandidateStatus.ACCEPTED,
+                    CandidateStatus.GRADUATED,
+                ]),
+            )
         )
         if submission_grade_only:
             stmt = stmt.where(
                 ResearchEvaluation.checks_passed == ResearchEvaluation.checks_total,
                 ResearchEvaluation.checks_total > 0,
             )
-        stmt = stmt.order_by(desc(ResearchEvaluation.composite_score)).limit(limit)
+        stmt = stmt.order_by(
+            desc(
+                func.coalesce(
+                    ResearchEvaluation.val_composite_score,
+                    ResearchEvaluation.composite_score,
+                )
+            )
+        ).limit(limit)
         res = await session.execute(stmt)
         rows = res.all()
 
-    return [
-        {
-            "candidateId": cand.id,
-            "expression": cand.expression,
-            "hypothesis": cand.hypothesis,
-            "isSharpe": round(float(ev.is_sharpe), 4) if ev.is_sharpe is not None else None,
-            "isFitness": round(float(ev.is_fitness), 4) if ev.is_fitness is not None else None,
-            "isTurnover": round(float(ev.is_turnover), 4) if ev.is_turnover is not None else None,
-            "isDrawdown": round(float(ev.is_drawdown), 4) if ev.is_drawdown is not None else None,
-            "isMargin": round(float(ev.is_margin), 6) if ev.is_margin is not None else None,
-            "oosSharpe": round(float(ev.oos_sharpe), 4) if ev.oos_sharpe is not None else None,
-            "oosFitness": round(float(ev.oos_fitness), 4) if ev.oos_fitness is not None else None,
-            "oosTurnover": round(float(ev.oos_turnover), 4) if ev.oos_turnover is not None else None,
-            "fullSharpe": round(float(ev.full_sharpe), 4) if ev.full_sharpe is not None else None,
-            "fullFitness": round(float(ev.full_fitness), 4) if ev.full_fitness is not None else None,
-            "afterCostSharpe": round(float(ev.after_cost_sharpe), 4) if ev.after_cost_sharpe is not None else None,
-            "isOosGap": round(float(ev.is_oos_gap), 4) if ev.is_oos_gap is not None else None,
-            "sharpeDecay": round(float(ev.sharpe_decay), 4) if ev.sharpe_decay is not None else None,
-            "compositeScore": round(float(ev.composite_score), 4) if ev.composite_score is not None else None,
-            "checks": ev.checks,
-            "checksPassed": ev.checks_passed,
-            "checksTotal": ev.checks_total,
-            "isSubmissionGrade": (ev.checks_passed == ev.checks_total and ev.checks_total > 0),
-            "evaluatedAt": ev.evaluated_at.isoformat() if ev.evaluated_at else None,
+    results: list[dict[str, Any]] = []
+    for cand, ev in rows:
+        is_grad = (cand.status == CandidateStatus.GRADUATED)
+        h_sharpe = ev.holdout_sharpe if is_grad else None
+        h_fitness = ev.holdout_fitness if is_grad else None
+        h_turnover = ev.holdout_turnover if is_grad else None
+        h_returns = ev.holdout_returns if is_grad else None
+        h_drawdown = ev.holdout_drawdown if is_grad else None
+        h_after_cost = ev.holdout_after_cost_sharpe if is_grad else None
+
+        results.append(
+            {
+                "candidateId": cand.id,
+                "expression": cand.expression,
+                "hypothesis": cand.hypothesis,
+                "evaluationScheme": ev.evaluation_scheme or "TWO_WAY_LEGACY",
+                "isGraduated": is_grad,
+                "isSharpe": round(float(ev.is_sharpe), 4) if ev.is_sharpe is not None else None,
+                "isFitness": round(float(ev.is_fitness), 4) if ev.is_fitness is not None else None,
+                "isTurnover": round(float(ev.is_turnover), 4) if ev.is_turnover is not None else None,
+                "isDrawdown": round(float(ev.is_drawdown), 4) if ev.is_drawdown is not None else None,
+                "isMargin": round(float(ev.is_margin), 6) if ev.is_margin is not None else None,
+                "valSharpe": round(float(ev.val_sharpe), 4) if ev.val_sharpe is not None else None,
+                "valFitness": round(float(ev.val_fitness), 4) if ev.val_fitness is not None else None,
+                "valTurnover": round(float(ev.val_turnover), 4) if ev.val_turnover is not None else None,
+                "valReturns": round(float(ev.val_returns), 4) if ev.val_returns is not None else None,
+                "valDrawdown": round(float(ev.val_drawdown), 4) if ev.val_drawdown is not None else None,
+                "valAfterCostSharpe": round(float(ev.val_after_cost_sharpe), 4) if ev.val_after_cost_sharpe is not None else None,
+                "valCompositeScore": round(float(ev.val_composite_score), 4) if ev.val_composite_score is not None else None,
+                "isValDecay": round(float(ev.is_val_decay), 4) if ev.is_val_decay is not None else None,
+                "oosSharpe": round(float(ev.oos_sharpe), 4) if ev.oos_sharpe is not None else None,
+                "oosFitness": round(float(ev.oos_fitness), 4) if ev.oos_fitness is not None else None,
+                "oosTurnover": round(float(ev.oos_turnover), 4) if ev.oos_turnover is not None else None,
+                "fullSharpe": round(float(ev.full_sharpe), 4) if ev.full_sharpe is not None else None,
+                "fullFitness": round(float(ev.full_fitness), 4) if ev.full_fitness is not None else None,
+                "afterCostSharpe": round(float(ev.after_cost_sharpe), 4) if ev.after_cost_sharpe is not None else None,
+                "isOosGap": round(float(ev.is_oos_gap), 4) if ev.is_oos_gap is not None else None,
+                "sharpeDecay": round(float(ev.sharpe_decay), 4) if ev.sharpe_decay is not None else None,
+                "compositeScore": round(float(ev.composite_score), 4) if ev.composite_score is not None else None,
+                "holdoutSharpe": round(float(h_sharpe), 4) if h_sharpe is not None else None,
+                "holdoutFitness": round(float(h_fitness), 4) if h_fitness is not None else None,
+                "holdoutTurnover": round(float(h_turnover), 4) if h_turnover is not None else None,
+                "holdoutReturns": round(float(h_returns), 4) if h_returns is not None else None,
+                "holdoutDrawdown": round(float(h_drawdown), 4) if h_drawdown is not None else None,
+                "holdoutAfterCostSharpe": round(float(h_after_cost), 4) if h_after_cost is not None else None,
+                "checks": ev.checks,
+                "checksPassed": ev.checks_passed,
+                "checksTotal": ev.checks_total,
+                "isSubmissionGrade": (ev.checks_passed == ev.checks_total and ev.checks_total > 0),
+                "evaluatedAt": ev.evaluated_at.isoformat() if ev.evaluated_at else None,
+                "holdoutEvaluatedAt": ev.holdout_evaluated_at.isoformat() if ev.holdout_evaluated_at else None,
+            }
+        )
+    return results
+
+
+@router.post("/sessions/{session_id}/candidates/{candidate_id}/graduate")
+async def graduate_candidate_endpoint(
+    session_id: int, candidate_id: int, state: State
+) -> dict[str, Any]:
+    """Evaluates final holdout and graduates an ACCEPTED candidate immutably."""
+    async with state.db.session() as session:
+        cand = await session.get(ResearchCandidate, candidate_id)
+        if cand is None or cand.session_id != session_id:
+            raise refuse(
+                404,
+                "candidate_not_found",
+                f"Candidate {candidate_id} was not found in session {session_id}.",
+            )
+    try:
+        scorecard = await state.evaluation.graduate_candidate(candidate_id=candidate_id)
+        return {
+            "status": "GRADUATED",
+            "candidateId": candidate_id,
+            "holdoutSharpe": scorecard.holdout_sharpe,
+            "holdoutFitness": scorecard.holdout_fitness,
+            "holdoutTurnover": scorecard.holdout_turnover,
+            "holdoutReturns": scorecard.holdout_returns,
+            "holdoutDrawdown": scorecard.holdout_drawdown,
+            "holdoutAfterCostSharpe": scorecard.holdout_after_cost_sharpe,
+            "configHash": scorecard.config_hash,
+            "canonicalSpec": scorecard.canonical_spec,
+            "evaluatedAt": scorecard.holdout_evaluated_at.isoformat() if scorecard.holdout_evaluated_at else None,
         }
-        for cand, ev in rows
-    ]
+    except HoldoutIndeterminacyError as exc:
+        raise refuse(409, "holdout_indeterminacy", str(exc))
+    except HoldoutChronologyError as exc:
+        raise refuse(400, "holdout_chronology_violation", str(exc))
+    except HoldoutOverlapError as exc:
+        raise refuse(409, "holdout_overlap_conflict", str(exc))
+    except HoldoutImmutabilityError as exc:
+        raise refuse(409, "holdout_immutable", str(exc))
+    except InsufficientDataError as exc:
+        raise refuse(400, "insufficient_data", str(exc))
 
 
 @router.post("/sessions/{session_id}/robustness")
@@ -663,8 +1018,6 @@ async def run_robustness_suite(
             "results": [],
         }
 
-    import random
-
     all_results: list[dict[str, Any]] = []
     total_passed = 0
 
@@ -675,36 +1028,13 @@ async def run_robustness_suite(
             base_decay=cand.sim_decay or 4,
             base_universe=cand.sim_universe or "TOP3000",
         )
+        suite_results = await state.robustness.run_candidate_suite(
+            candidate_id=cand.id,
+            suite=suite,
+            baseline_eval_id=ev.id,
+        )
 
-        baseline_sharpe = float(ev.full_sharpe or 1.0)
-        baseline_fitness = float(ev.full_fitness or 1.0)
-
-        for plan in suite:
-            random.seed(hash((cand.id, plan.test_type, plan.test_value)))
-
-            # Simulate realistic perturbation degradation
-            if plan.test_type == "neutralization":
-                degradation = random.uniform(0.05, 0.25)
-            elif plan.test_type == "decay":
-                degradation = random.uniform(0.02, 0.15)
-            elif plan.test_type == "universe":
-                degradation = random.uniform(0.10, 0.30)
-            else:
-                degradation = random.uniform(0.05, 0.20)
-
-            perturbed_sharpe = round(baseline_sharpe * (1 - degradation), 4)
-            perturbed_fitness = round(baseline_fitness * (1 - degradation * 0.8), 4)
-            perturbed_turnover = round(float(ev.is_turnover or 0.15) * (1 + degradation * 0.5), 4)
-
-            result = await state.robustness.record_test_result(
-                candidate_id=cand.id,
-                test_type=plan.test_type,
-                test_value=plan.test_value,
-                perturbed_sharpe=perturbed_sharpe,
-                perturbed_fitness=perturbed_fitness,
-                perturbed_turnover=perturbed_turnover,
-            )
-
+        for result in suite_results:
             if result.passed:
                 total_passed += 1
 
@@ -716,6 +1046,15 @@ async def run_robustness_suite(
                 "perturbedSharpe": result.perturbed_sharpe,
                 "sharpeDelta": result.sharpe_delta,
                 "passed": result.passed,
+                "status": result.status,
+                "resultKind": result.result_kind,
+                "isSynthetic": result.is_synthetic,
+                "brainSimulationId": result.brain_simulation_id,
+                "perturbedAlphaId": result.perturbed_alpha_id,
+                "perturbationConfig": result.perturbation_config,
+                "errorDetails": result.error_details,
+                "valStartDate": result.val_start_date.isoformat() if result.val_start_date else None,
+                "valEndDate": result.val_end_date.isoformat() if result.val_end_date else None,
                 "message": result.message,
             })
 
@@ -739,11 +1078,28 @@ async def get_candidate_robustness(
 
 
 @router.post("/sessions/{session_id}/learning/cycle")
-async def trigger_learning_cycle(session_id: int, state: State) -> dict[str, Any]:
+async def trigger_learning_cycle(
+    session_id: int,
+    state: State,
+    category: str | None = Query(None),
+) -> dict[str, Any]:
     """Manually triggers a closed-loop self-learning reflection cycle."""
-    result = await state.learning.execute_learning_cycle(session_id=session_id)
+    result = await state.learning.execute_learning_cycle(
+        session_id=session_id, category=category
+    )
     # Also take leaderboard snapshot
     await state.leaderboard.capture_snapshot(session_id=session_id, generation=result.generation)
+
+    updated_ids = getattr(
+        result,
+        "updated_prompt_strategy_ids",
+        [result.updated_prompt_strategy_id] if result.updated_prompt_strategy_id else [],
+    )
+    cats_evolved = getattr(
+        result,
+        "categories_evolved",
+        [getattr(result, "category", "general")],
+    )
 
     return {
         "status": "success",
@@ -756,6 +1112,8 @@ async def trigger_learning_cycle(session_id: int, state: State) -> dict[str, Any
         "bestSharpe": result.best_sharpe,
         "insightsGenerated": len(result.insights_generated),
         "updatedPromptStrategyId": result.updated_prompt_strategy_id,
+        "updatedPromptStrategyIds": updated_ids,
+        "categoriesEvolved": cats_evolved,
     }
 
 
@@ -858,10 +1216,12 @@ async def get_alpha_leaderboard(
 
 @router.get("/leaderboards/researchers")
 async def get_researcher_leaderboard(
-    state: State, session_id: int | None = None
+    state: State, session_id: int | None = None, cohort_id: str | None = None
 ) -> list[dict[str, Any]]:
     """Returns the LLM Researcher Persona Leaderboard."""
-    ranks = await state.leaderboard.get_researcher_leaderboard(session_id=session_id)
+    ranks = await state.leaderboard.get_researcher_leaderboard(
+        session_id=session_id, cohort_id=cohort_id
+    )
     return [
         {
             "rank": r.rank,
@@ -876,9 +1236,137 @@ async def get_researcher_leaderboard(
             "bestSharpe": r.best_sharpe,
             "submissionGradeCount": r.submission_grade_count,
             "topDecileRate": r.top_decile_rate,
+            # P1-11 Fair Benchmarking & Funnel fields
+            "status": r.status,
+            "cohortId": r.cohort_id,
+            "sampleCount": r.sample_count,
+            "meanValidationSharpe": r.mean_validation_sharpe,
+            "cohortBaselineSharpe": r.cohort_baseline_sharpe,
+            "relativeLift": r.relative_lift,
+            "shrunkRelativeLift": r.shrunk_relative_lift,
+            "sharpeSe": r.sharpe_se,
+            "lcbSharpe": r.lcb_sharpe,
+            "astValidCount": r.ast_valid_count,
+            "astValidRate": r.ast_valid_rate,
+            "preflightPassCount": r.preflight_pass_count,
+            "preflightPassRate": r.preflight_pass_rate,
+            "simulatedCount": r.simulated_count,
+            "simulationPassCount": r.simulation_pass_count,
+            "simulationPassRate": r.simulation_pass_rate,
+            "statisticalWinnerCount": r.statistical_winner_count,
+            "statisticalDiscoveryRate": r.statistical_discovery_rate,
+            "verifiedProvenanceCount": r.verified_provenance_count,
+            "verifiedProvenanceRate": r.verified_provenance_rate,
+            "totalTokens": r.total_tokens,
+            "efficiencyCostUsd": r.efficiency_cost_usd,
+            "efficiencyLatencySec": r.efficiency_latency_sec,
+            "incomparabilityReasons": r.incomparability_reasons,
         }
         for r in ranks
     ]
+
+
+@router.get("/leaderboards/prompts")
+async def get_prompt_leaderboard(
+    state: State,
+    session_id: int | None = None,
+    cohort_id: str | None = None,
+    category: str | None = None,
+    min_evaluated: int = 3,
+) -> dict[str, Any]:
+    """Returns the Prompt Version Leaderboard partitioned by comparable simulation cohorts."""
+    res = await state.leaderboard.get_prompt_strategy_leaderboard(
+        session_id=session_id,
+        cohort_id=cohort_id,
+        category=category,
+        min_evaluated=min_evaluated,
+    )
+    return {
+        "activeCohorts": [
+            {
+                "cohortId": c.cohort_id,
+                "category": c.category,
+                "region": c.region,
+                "universe": c.universe,
+                "neutralization": c.neutralization,
+                "decay": c.decay,
+                "delay": c.delay,
+                "truncation": c.truncation,
+                "nanHandling": c.nan_handling,
+                "pasteurization": c.pasteurization,
+                "unitHandling": c.unit_handling,
+                "costBps": c.cost_bps,
+                "evaluationScheme": c.evaluation_scheme,
+                "valStart": c.val_start,
+                "valEnd": c.val_end,
+                "datasets": c.datasets,
+                "candidateCount": c.candidate_count,
+            }
+            for c in res.active_cohorts
+        ],
+        "rankings": [
+            {
+                "promptVersionId": r.prompt_version_id,
+                "category": r.category,
+                "version": r.version,
+                "authoringSource": r.authoring_source,
+                "contentHash": r.content_hash,
+                "parentVersionId": r.parent_version_id,
+                "cohortId": r.cohort_id,
+                "rank": r.rank,
+                "status": r.status,
+                "incomparabilityReasons": r.incomparability_reasons,
+                "funnel": {
+                    "generated": r.funnel.generated,
+                    "valid": r.funnel.valid,
+                    "evaluated": r.funnel.evaluated,
+                    "accepted": r.funnel.accepted,
+                    "validPct": r.funnel.valid_pct,
+                    "evaluatedPct": r.funnel.evaluated_pct,
+                    "acceptedPct": r.funnel.accepted_pct,
+                },
+                "validationMetrics": {
+                    "medianSharpe": r.validation_metrics.median_sharpe,
+                    "meanSharpe": r.validation_metrics.mean_sharpe,
+                    "bestSharpe": r.validation_metrics.best_sharpe,
+                    "medianFitness": r.validation_metrics.median_fitness,
+                    "medianTurnover": r.validation_metrics.median_turnover,
+                },
+            }
+            for r in res.rankings
+        ],
+        "incomparableRecords": [
+            {
+                "promptVersionId": r.prompt_version_id,
+                "category": r.category,
+                "version": r.version,
+                "authoringSource": r.authoring_source,
+                "contentHash": r.content_hash,
+                "parentVersionId": r.parent_version_id,
+                "cohortId": r.cohort_id,
+                "rank": r.rank,
+                "status": r.status,
+                "incomparabilityReasons": r.incomparability_reasons,
+                "funnel": {
+                    "generated": r.funnel.generated,
+                    "valid": r.funnel.valid,
+                    "evaluated": r.funnel.evaluated,
+                    "accepted": r.funnel.accepted,
+                    "validPct": r.funnel.valid_pct,
+                    "evaluatedPct": r.funnel.evaluated_pct,
+                    "acceptedPct": r.funnel.accepted_pct,
+                },
+                "validationMetrics": {
+                    "medianSharpe": r.validation_metrics.median_sharpe,
+                    "meanSharpe": r.validation_metrics.mean_sharpe,
+                    "bestSharpe": r.validation_metrics.best_sharpe,
+                    "medianFitness": r.validation_metrics.median_fitness,
+                    "medianTurnover": r.validation_metrics.median_turnover,
+                },
+            }
+            for r in res.incomparable_records
+        ],
+    }
 
 
 @router.get("/leaderboards/snapshots")
@@ -919,7 +1407,15 @@ async def curate_alpha_pool(payload: CuratePoolIn, state: State) -> dict[str, An
                 ResearchEvaluation,
                 ResearchEvaluation.candidate_id == ResearchCandidate.id,
             )
-            .where(ResearchEvaluation.full_sharpe >= 1.0)
+            .where(
+                ResearchEvaluation.is_verified.is_(True),
+                ResearchCandidate.status.in_([
+                    CandidateStatus.EVALUATED,
+                    CandidateStatus.ACCEPTED,
+                    CandidateStatus.GRADUATED,
+                ]),
+                func.coalesce(ResearchEvaluation.val_sharpe, ResearchEvaluation.full_sharpe) >= 1.0,
+            )
         )
         if payload.session_id is not None:
             stmt = stmt.where(ResearchCandidate.session_id == payload.session_id)
@@ -944,30 +1440,43 @@ async def curate_alpha_pool(payload: CuratePoolIn, state: State) -> dict[str, An
         alpha_ids = [cand.alpha_id for cand, _ in rows if cand.alpha_id]
         real_series = await state.alphas.series(alpha_ids) if alpha_ids else {}
 
-        import math
-        import random
         for cand, ev in rows:
+            if not cand.alpha_id or cand.alpha_id not in real_series:
+                continue
+            days_data = sorted(real_series[cand.alpha_id].items())
+            if len(days_data) < 20:
+                continue
+
+            # In development pool curation, strictly slice to validation window
+            is_3way = ev.evaluation_scheme in ("THREE_WAY_CHRONOLOGICAL", "SPLIT_3WAY_FINAL")
+            if is_3way and ev.is_end_date and ev.val_end_date:
+                days_data = [(d, val) for d, val in days_data if ev.is_end_date < d <= ev.val_end_date]
+                if len(days_data) < 20:
+                    continue
+
             cid = cand.id
             candidates_data.append(
                 {
                     "id": cid,
                     "alpha_id": cand.alpha_id,
                     "expression": cand.expression,
-                    "sharpe": ev.full_sharpe or 0.0,
-                    "fitness": ev.full_fitness or 0.0,
-                    "turnover": ev.is_turnover or 0.15,
-                    "composite_score": ev.composite_score or 0.0,
+                    "sharpe": ev.val_sharpe if (is_3way and ev.val_sharpe is not None) else (ev.full_sharpe or 0.0),
+                    "fitness": ev.val_fitness if (is_3way and ev.val_fitness is not None) else (ev.full_fitness or 0.0),
+                    "turnover": ev.val_turnover if (is_3way and ev.val_turnover is not None) else (ev.is_turnover or 0.15),
+                    "composite_score": ev.val_composite_score if (is_3way and ev.val_composite_score is not None) else (ev.composite_score or 0.0),
                 }
             )
-            if cand.alpha_id and cand.alpha_id in real_series:
-                days_data = sorted(real_series[cand.alpha_id].items())
-                pnl_map[cid] = [p for _, (p, _) in days_data]
-                to_map[cid] = [t for _, (_, t) in days_data]
-            else:
-                s_val = float(ev.full_sharpe or 1.0)
-                daily_mu = (s_val / math.sqrt(250)) * 500.0
-                pnl_map[cid] = [daily_mu + (i % 7 - 3) * 200.0 for i in range(250)]
-                to_map[cid] = [float(ev.is_turnover or 0.15)] * 250
+            pnl_map[cid] = [p for _, (p, _) in days_data]
+            to_map[cid] = [t for _, (_, t) in days_data]
+
+        if not candidates_data:
+            return {
+                "poolSize": 0,
+                "members": [],
+                "combinedSharpe": 0.0,
+                "maxCorrelation": 0.0,
+                "avgCorrelation": 0.0,
+            }
 
         pool_result = state.pool_optimizer.curate_pool(
             candidates_data=candidates_data,

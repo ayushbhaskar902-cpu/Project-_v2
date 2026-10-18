@@ -18,6 +18,8 @@ scored as its second-best region (see :func:`..vault.store.family_row`): BRAIN s
 only when two regions pass.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import math

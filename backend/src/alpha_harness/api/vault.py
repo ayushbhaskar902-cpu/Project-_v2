@@ -1,5 +1,7 @@
 """The alpha vault: every alpha you have run, its checks, and its daily returns."""
 
+from __future__ import annotations
+
 import itertools
 from datetime import timedelta
 from typing import Annotated, Any, Literal

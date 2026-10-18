@@ -4,6 +4,8 @@ Every BRAIN failure becomes an HTTP response in exactly one place, so business l
 raise typed exceptions and never touch ``HTTPException``.
 """
 
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
 

@@ -5,6 +5,8 @@ task freezes its template, its variables' choices and its market when it is adde
 every lab's task, only runs from the Tasks tab.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 from typing import Annotated, Any, Literal

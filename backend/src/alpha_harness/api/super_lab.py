@@ -1,5 +1,7 @@
 """Super Alpha Lab: one form, one task of SuperAlphas from your own submitted Alphas."""
 
+from __future__ import annotations
+
 from typing import Literal
 
 from fastapi import APIRouter

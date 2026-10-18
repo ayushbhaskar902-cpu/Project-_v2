@@ -10,6 +10,8 @@ of a platform id, and :class:`~alpha_harness.engine.tracker.SimulationTracker` p
 parent until it lists its children.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import dataclasses
@@ -220,6 +222,12 @@ class BatchEngine:
         queued: list[int] = []
         skipped: list[dict[str, Any]] = []
         outcomes: list[dict[str, Any]] = []
+
+        # P1-07: Reject unsupported alpha languages before queueing
+        from ..generator.pipeline import validate_alpha_language
+        for request in requests:
+            validate_alpha_language(getattr(request.settings, "language", None) or "FASTEXPR")
+
         moded = [self._moded(request) for request in requests]
 
         # The duplicate lookup and the insert must not interleave with another enqueue:

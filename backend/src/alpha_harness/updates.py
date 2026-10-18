@@ -15,6 +15,8 @@ there is nothing to hand the request to. Updates then report themselves unavaila
 why, rather than failing at the last step.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import os
@@ -355,7 +357,7 @@ def _launcher_json(name: str) -> dict[str, Any]:
         return {}
     try:
         body = json.loads((home / name).read_text(encoding="utf-8"))
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return {}
     return body if isinstance(body, dict) else {}
 

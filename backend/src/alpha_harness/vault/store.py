@@ -8,6 +8,8 @@ if the series are kept. The stored series rebuilds the platform's own figures (s
 :mod:`.metrics`), so a mix can be judged before a simulation is spent on it.
 """
 
+from __future__ import annotations
+
 import itertools
 import json
 from datetime import date, datetime
@@ -768,6 +770,39 @@ class AlphaVault:
         )
         stored = {str(r["alpha_id"]) for r in rows}
         return [a for a in alpha_ids if a not in stored]
+
+    async def load_verified_series(
+        self, alpha_id: str
+    ) -> tuple[list[date], list[float], list[float]] | None:
+        """Loads and strictly verifies an alpha's stored daily series from the BRAIN vault.
+
+        Enforces all vault verification rules:
+        1. Alpha exists in catalog and satisfies series_version == SERIES_VERSION (3).
+        2. Daily rows contain strictly non-null PnL and non-null turnover.
+        3. Has at least 20 trading day observations.
+        4. Dates, PnL, and turnover are strictly ordered and aligned.
+
+        Returns (dates, pnl_series, turnover_series) if fully verified, else None.
+        """
+        lacking = await self.lacking_series([alpha_id])
+        if lacking:
+            return None
+
+        rows = await self.catalog.query(
+            """
+            SELECT date, pnl, turnover FROM alpha_pnl
+            WHERE alpha_id = ? AND pnl IS NOT NULL AND turnover IS NOT NULL
+            ORDER BY date
+            """,
+            [alpha_id],
+        )
+        if not rows or len(rows) < 20:
+            return None
+
+        dates = [r["date"] for r in rows]
+        pnls = [float(r["pnl"]) for r in rows]
+        turnovers = [float(r["turnover"]) for r in rows]
+        return dates, pnls, turnovers
 
     async def train_pnl(self, alpha_ids: list[str]) -> dict[str, dict[date, float]]:
         """Each Alpha's daily PnL before its last two years, which a train/test split holds out.

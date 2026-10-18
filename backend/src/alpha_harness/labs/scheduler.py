@@ -5,6 +5,8 @@ cores, keeping them full as batches come back, and taking unsent work off the qu
 only decides how one point of its search is drawn (its ``draw``).
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 from typing import TYPE_CHECKING, Any

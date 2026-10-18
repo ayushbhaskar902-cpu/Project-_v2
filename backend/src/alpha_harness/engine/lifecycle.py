@@ -11,6 +11,8 @@ Re-running an identical alpha consumes quota for nothing — the platform counts
 though the alpha already exists — so the full request is hashed to recognise a repeat.
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 from dataclasses import dataclass

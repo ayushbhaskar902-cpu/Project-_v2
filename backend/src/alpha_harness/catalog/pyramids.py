@@ -7,6 +7,8 @@ no quarter dates, and Genius levels run on calendar quarters, so the quarter is 
 from today's date in platform time.
 """
 
+from __future__ import annotations
+
 import math
 import time
 from datetime import date, datetime

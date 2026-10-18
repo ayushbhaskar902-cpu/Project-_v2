@@ -9,6 +9,9 @@ Precedence, loosest first: ternary, ``||``, ``&&``, comparisons, ``+ -``, ``* /`
 (right-associative), unary ``-``/``!``, calls.
 """
 
+from __future__ import annotations
+
+import hashlib
 import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -402,6 +405,61 @@ def operator_names(tree: Node) -> list[str]:
     return list(dict.fromkeys(n.value for _, n in walk(tree) if n.kind == "call"))
 
 
+def extract_ast_operators(
+    expression: str,
+    catalog: Any | None = None,
+    *,
+    deduplicate: bool = True,
+) -> list[str]:
+    """Extracts genuine operator calls from Fast Expression AST, validated against OperatorCatalog.
+
+    - Rejects identifiers, constants, and keywords (only node.kind == 'call' are operators).
+    - Validates operator names against OperatorCatalog (unknown operators are excluded).
+    - If deduplicate is True, returns unique operators in order of appearance (1 sample per candidate).
+    - If deduplicate is False, returns all operator call occurrences.
+    """
+    if not expression or not expression.strip():
+        return []
+    try:
+        tree = parse(expression)
+    except Exception:
+        return []
+
+    valid_names: set[str] | None = None
+    if catalog is not None:
+        if hasattr(catalog, "get_operator_names"):
+            valid_names = catalog.get_operator_names()
+    else:
+        try:
+            from ..discovery.catalog import OperatorCatalog
+            default_cat = OperatorCatalog(scope="REGULAR")
+            valid_names = default_cat.get_operator_names()
+        except Exception:
+            valid_names = None
+
+    extracted: list[str] = []
+    seen: set[str] = set()
+
+    for _, node in walk(tree):
+        if node.kind == "call":
+            op_name = node.value
+            if valid_names is not None:
+                if op_name not in valid_names:
+                    continue
+            elif catalog is not None and hasattr(catalog, "get_operator"):
+                if catalog.get_operator(op_name) is None:
+                    continue
+
+            if deduplicate:
+                if op_name not in seen:
+                    seen.add(op_name)
+                    extracted.append(op_name)
+            else:
+                extracted.append(op_name)
+
+    return extracted
+
+
 def operator_count(node: Node) -> int:
     """Power Pool's count: every call and every arithmetic or logical operator, backfills excepted.
 
@@ -468,3 +526,162 @@ def validate(
         ):
             problems.append(f"{node.value} is not a data field here.")
     return problems
+
+
+# -- candidate fingerprinting & AST skeleton abstraction (P1-14) -----------
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateFingerprint:
+    """Deterministic structural and semantic fingerprint of an alpha candidate expression."""
+
+    normalized_expr: str
+    expr_hash: str
+    skeleton: str
+    fields: tuple[str, ...]
+    operators: tuple[str, ...]
+    operator_count: int
+    field_count: int
+
+
+def canonicalize_expression(expression: str) -> str:
+    """Canonicalizes a FastExpr expression into standard rendered form."""
+    if not expression or not expression.strip():
+        return ""
+    try:
+        tree = parse(expression.strip())
+        return render(tree)
+    except Exception:
+        return " ".join(expression.strip().split())
+
+
+def compute_expression_hash(expression: str) -> str:
+    """Computes deterministic SHA-256 hash of canonicalized expression."""
+    canon = canonicalize_expression(expression)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def abstract_ast_skeleton(tree: Node) -> Node:
+    """Abstracts constants and data fields with placeholders while preserving AST structure.
+
+    - Numeric constants (`kind == "num"`) -> replaced with placeholder `CONST`.
+    - Data field names (`kind == "name"`, excluding grouping, keywords, literals) -> `FIELD`.
+    - All operator calls, binary operators, unary operators, and arity structure are preserved.
+    """
+    assigned = {node.value for _, node in walk(tree) if node.kind == "assign"}
+
+    def _transform(node: Node, path: Path) -> Node:
+        if node.kind == "num":
+            return Node(kind="num", value="CONST")
+        if node.kind == "name":
+            is_keyword = path and path[-1] >= len(node_at(tree, path[:-1]).args)
+            if (
+                not is_keyword
+                and node.value not in assigned
+                and node.value not in GROUPING
+                and node.value.lower() not in ("true", "false", "nan")
+            ):
+                return Node(kind="name", value="FIELD")
+            return node
+
+        new_args = tuple(_transform(arg, (*path, idx)) for idx, arg in enumerate(node.args))
+        new_kwargs = tuple(
+            (k, _transform(v, (*path, len(node.args) + idx)))
+            for idx, (k, v) in enumerate(node.kwargs)
+        )
+        return replace(node, args=new_args, kwargs=new_kwargs)
+
+    return _transform(tree, ())
+
+
+def canonicalize_skeleton(expression: str) -> str:
+    """Generates the canonical AST skeleton string for an expression."""
+    if not expression or not expression.strip():
+        return ""
+    try:
+        tree = parse(expression.strip())
+        skeleton_tree = abstract_ast_skeleton(tree)
+        return render(skeleton_tree)
+    except Exception:
+        return ""
+
+
+def extract_candidate_fingerprint(expression: str) -> CandidateFingerprint:
+    """Extracts deterministic fingerprint: normalized expr, SHA-256 hash, AST skeleton, fields, operators."""
+    if not expression or not expression.strip():
+        return CandidateFingerprint(
+            normalized_expr="",
+            expr_hash=hashlib.sha256(b"").hexdigest(),
+            skeleton="",
+            fields=(),
+            operators=(),
+            operator_count=0,
+            field_count=0,
+        )
+    try:
+        tree = parse(expression.strip())
+        canon = render(tree)
+        h = hashlib.sha256(canon.encode("utf-8")).hexdigest()
+        skel = render(abstract_ast_skeleton(tree))
+        flds = tuple(sorted(data_fields(tree)))
+        ops = tuple(sorted(operator_names(tree)))
+        op_cnt = operator_count(tree)
+        fld_cnt = len(flds)
+        return CandidateFingerprint(
+            normalized_expr=canon,
+            expr_hash=h,
+            skeleton=skel,
+            fields=flds,
+            operators=ops,
+            operator_count=op_cnt,
+            field_count=fld_cnt,
+        )
+    except Exception:
+        raw_norm = " ".join(expression.strip().split())
+        return CandidateFingerprint(
+            normalized_expr=raw_norm,
+            expr_hash=hashlib.sha256(raw_norm.encode("utf-8")).hexdigest(),
+            skeleton="",
+            fields=(),
+            operators=(),
+            operator_count=0,
+            field_count=0,
+        )
+
+
+def is_near_duplicate(
+    fp1: CandidateFingerprint,
+    fp2: CandidateFingerprint,
+    cat1: str | None = None,
+    cat2: str | None = None,
+) -> tuple[bool, str]:
+    """Determines if two candidates are near-duplicates (parameter jitter on identical hypothesis).
+
+    Two candidates are near-duplicates IF AND ONLY IF:
+    1. They have identical AST skeletons (same operator composition and nesting structure)
+    2. They operate on identical data fields
+    3. They use identical operator sets
+    4. They belong to compatible/identical hypothesis categories (if provided)
+
+    Different data fields (e.g. ts_decay_linear(close, 10) vs ts_decay_linear(volume, 10))
+    or different hypothesis categories (e.g. MOMENTUM vs MEAN_REVERSION) are NOT duplicates.
+    """
+    if fp1.expr_hash == fp2.expr_hash:
+        return True, "EXACT_NORMALIZED_MATCH"
+
+    if not fp1.skeleton or not fp2.skeleton:
+        return False, "UNPARSED_SKELETON"
+
+    if fp1.skeleton != fp2.skeleton:
+        return False, "DIFFERENT_AST_SKELETON"
+
+    if fp1.fields != fp2.fields:
+        return False, f"DIFFERENT_DATA_FIELDS ({','.join(fp1.fields)} vs {','.join(fp2.fields)})"
+
+    if fp1.operators != fp2.operators:
+        return False, f"DIFFERENT_OPERATORS ({','.join(fp1.operators)} vs {','.join(fp2.operators)})"
+
+    if cat1 and cat2 and cat1.strip().lower() != cat2.strip().lower():
+        return False, f"DIFFERENT_HYPOTHESIS_CATEGORY ({cat1} vs {cat2})"
+
+    return True, "PARAMETER_JITTER_NEAR_DUPLICATE"

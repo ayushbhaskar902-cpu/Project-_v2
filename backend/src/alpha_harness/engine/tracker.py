@@ -10,6 +10,8 @@ it with the id the instant the response lands. A crash between the two leaves a
 ``PENDING`` row, which :meth:`reconcile` surfaces rather than silently discards.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import time

@@ -1,5 +1,7 @@
 """Portfolio: submitted Alphas combined at equal weight, as BRAIN combines its own pool."""
 
+from __future__ import annotations
+
 import asyncio
 from typing import Any, Literal
 

@@ -6,6 +6,8 @@ Deliberately permissive — ``extra="allow"`` everywhere — because the platfor
 over time and unknown ones should survive into the UI rather than be silently dropped.
 """
 
+from __future__ import annotations
+
 from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, Self
@@ -162,6 +164,12 @@ class SimulationSettings(BrainModel):
     selection_handling: str | None = None
     selection_limit: int | None = None
     component_activation: str | None = None
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def _validate_language(cls, v: Any) -> str:
+        from ..generator.pipeline import validate_alpha_language
+        return validate_alpha_language(v)
 
 
 #: BRAIN's test period: the last two of the ten years are held out.

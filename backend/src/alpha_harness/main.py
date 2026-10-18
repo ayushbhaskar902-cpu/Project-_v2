@@ -9,6 +9,8 @@ The frontend talks to this over HTTP + WebSocket only.
 Credentials never leave the backend.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import logging

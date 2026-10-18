@@ -7,6 +7,8 @@ gets room for conviction, while a narrow one, a multi-country region or Delay 0 
 tighter so a few names cannot carry the book.
 """
 
+from __future__ import annotations
+
 import re
 
 #: The consultant Weight test: largest weight in one stock below 8% in USA, 10% elsewhere.

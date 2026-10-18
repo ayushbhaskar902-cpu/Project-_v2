@@ -1,5 +1,7 @@
 """Simulations and their resulting alphas."""
 
+from __future__ import annotations
+
 from fastapi import APIRouter, HTTPException
 
 from ..engine.lifecycle import serialise
