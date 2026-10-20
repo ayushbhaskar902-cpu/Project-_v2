@@ -1,8 +1,8 @@
-name: P2-04 verification
+name: P2-04 and P2-05 verification
 
 on:
   push:
-    branches: [wip/p2-04-verification]
+    branches: [wip/p2-04-verification, wip/p2-05-reproducible-seeds]
   workflow_dispatch:
 
 permissions:
@@ -43,6 +43,7 @@ jobs:
       - name: Target P2-04 backfill regressions
         id: p204
         continue-on-error: true
+        shell: bash
         working-directory: backend
         run: >-
           uv run --frozen --with pytest==8.4.2 python -m pytest
@@ -55,15 +56,24 @@ jobs:
           tests/test_p2_04_backfill_failure_association.py
           -vv -ra --junitxml=../p2-04-targeted.xml 2>&1 | tee ../p2-04-targeted.log
 
+      - name: Target P2-05 reproducibility regressions
+        id: p205
+        continue-on-error: true
+        shell: bash
+        working-directory: backend
+        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_05_reproducibility.py -vv -ra --junitxml=../p2-05-targeted.xml 2>&1 | tee ../p2-05-targeted.log
+
       - name: P2-01 evaluation-job suite
         id: p201
         continue-on-error: true
+        shell: bash
         working-directory: backend
         run: uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_01_evaluation_jobs.py -q -ra --junitxml=../p2-01.xml 2>&1 | tee ../p2-01.log
 
       - name: P0 regressions
         id: p0
         continue-on-error: true
+        shell: bash
         working-directory: backend
         run: >-
           uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p0_*.py
@@ -72,6 +82,7 @@ jobs:
       - name: P1 regressions
         id: p1
         continue-on-error: true
+        shell: bash
         working-directory: backend
         run: >-
           uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p1_*.py
@@ -80,6 +91,7 @@ jobs:
       - name: P2-02 regression
         id: p202
         continue-on-error: true
+        shell: bash
         working-directory: backend
         run: >-
           uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_02_research_services.py
@@ -88,6 +100,7 @@ jobs:
       - name: P2-03 regression
         id: p203
         continue-on-error: true
+        shell: bash
         working-directory: backend
         run: >-
           uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_03_researcher_attempts.py
@@ -96,6 +109,7 @@ jobs:
       - name: Complete backend suite
         id: backend
         continue-on-error: true
+        shell: bash
         working-directory: backend
         run: uv run --frozen --with pytest==8.4.2 python -m pytest tests --tb=short -q -ra --junitxml=../backend-full.xml 2>&1 | tee ../backend-full.log
 
@@ -140,7 +154,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: p2-04-verification-results
+          name: p2-04-p2-05-verification-results
           path: "*.xml"
           if-no-files-found: ignore
 
@@ -148,6 +162,7 @@ jobs:
         if: always()
         env:
           P204: ${{ steps.p204.outcome }}
+          P205: ${{ steps.p205.outcome }}
           P201: ${{ steps.p201.outcome }}
           P0: ${{ steps.p0.outcome }}
           P1: ${{ steps.p1.outcome }}
@@ -200,10 +215,11 @@ jobs:
               encoding="utf-8",
           )
           PY
-          printf 'Recorded outcomes: P2-04=%s P2-01=%s P0=%s P1=%s P2-02=%s P2-03=%s backend=%s frontend-tests=%s frontend-check=%s frontend-build=%s\n' \
-            "$P204" "$P201" "$P0" "$P1" "$P202" "$P203" "$BACKEND" "$FRONTEND_TESTS" "$FRONTEND_CHECK" "$FRONTEND_BUILD"
-          echo "::error title=Underlying verification outcomes::P2-04=$P204, P2-01=$P201, P0=$P0, P1=$P1, P2-02=$P202, P2-03=$P203, backend=$BACKEND, frontend-tests=$FRONTEND_TESTS, frontend-check=$FRONTEND_CHECK, frontend-build=$FRONTEND_BUILD"
-          test "$P204" = success && test "$P201" = success && test "$P0" = success \
+          printf 'Recorded outcomes: P2-04=%s P2-05=%s P2-01=%s P0=%s P1=%s P2-02=%s P2-03=%s backend=%s frontend-tests=%s frontend-check=%s frontend-build=%s\n' \
+            "$P204" "$P205" "$P201" "$P0" "$P1" "$P202" "$P203" "$BACKEND" "$FRONTEND_TESTS" "$FRONTEND_CHECK" "$FRONTEND_BUILD"
+          echo "::error title=Underlying verification outcomes::P2-04=$P204, P2-05=$P205, P2-01=$P201, P0=$P0, P1=$P1, P2-02=$P202, P2-03=$P203, backend=$BACKEND, frontend-tests=$FRONTEND_TESTS, frontend-check=$FRONTEND_CHECK, frontend-build=$FRONTEND_BUILD"
+          test "$P205" = success \
+            && test "$P204" = success && test "$P201" = success && test "$P0" = success \
             && test "$P1" = success && test "$P202" = success && test "$P203" = success \
             && test "$BACKEND" = success && test "$FRONTEND_TESTS" = success \
             && test "$FRONTEND_CHECK" = success && test "$FRONTEND_BUILD" = success

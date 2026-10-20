@@ -103,6 +103,7 @@ class TemplateTask(BaseModel):
     #: Needed to add a task; a preview ignores it.
     simulations: int = Field(default=0, ge=0, le=search.MAX_SIMULATIONS)
     template_name: str = Field(default="Template", max_length=128)
+    seed: int | None = Field(default=None, ge=0, le=(1 << 63) - 1)
 
 
 class OperatorDoc(Out):
@@ -712,7 +713,9 @@ async def _plan(body: TemplateTask, state: Any) -> dict[str, Any]:
         picks = template.field_choices(space)
         # A draw can land two variables on one field, so it is given a few more tries.
         sample = preview_samples(
-            lambda rng: template.draw(search.RandomTrial(rng), run, picks)[1], tries=25
+            lambda rng: template.draw(search.RandomTrial(rng), run, picks)[1],
+            tries=25,
+            seed=body.seed or 0,
         )
     own = StatsItem(text=body.template, variables=given)
     return {
@@ -770,4 +773,5 @@ async def add_task(body: TemplateTask, state: State) -> AddedTask:
         template_name=body.template_name.strip() or "Template",
         # No test period leaves no train years to score, so the whole period is scored.
         objective="sharpe" if body.test_period == "P0Y0M0D" else None,
+        seed=body.seed,
     )

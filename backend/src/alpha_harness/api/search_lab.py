@@ -89,6 +89,7 @@ async def _plan(body: SearchRequest, state: Any) -> dict[str, Any]:
                 search.suggest(search.RandomTrial(rng), space, choices), run
             ),
             tries=5,
+            seed=body.seed or 0,
         )
 
     return {
@@ -135,4 +136,5 @@ async def add_task(body: SearchRequest, state: State) -> AddedTask:
         simulations=size,
         batch_size=per_round,
         template_source="# Search Lab writes its own expressions; there is no template.",
+        seed=body.seed,
     )

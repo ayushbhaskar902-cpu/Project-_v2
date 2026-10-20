@@ -47,6 +47,7 @@ class PowerPoolRequest(BaseModel):
     simulations: int = Field(default=0, ge=0, le=search.MAX_SIMULATIONS)
     #: The Data Explorer's filter the datasets were chosen under: only fields it shows are used.
     field_filter: FieldFilter | None = None
+    seed: int | None = Field(default=None, ge=0, le=(1 << 63) - 1)
 
 
 class PowerPoolModel(Out):
@@ -250,4 +251,5 @@ async def add_task(body: PowerPoolRequest, state: State) -> AddedTask:
         template_source=(
             "# LLM Power Pool Lab writes its expressions with an LLM; there is no template."
         ),
+        seed=body.seed,
     )

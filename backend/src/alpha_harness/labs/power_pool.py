@@ -40,6 +40,7 @@ from .fastexpr import (
 )
 from .objectives import FAILURE
 from .params import PowerPoolParams, params_of
+from .seeding import derive_seed
 
 if TYPE_CHECKING:  # pragma: no cover
     import asyncio
@@ -422,11 +423,29 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
         row = await optimizer.get(study_id)
         if row is None or row.status != StudyStatus.RUNNING:
             return None
+        if row.seed is None:
+            return await _pause(
+                optimizer,
+                study_id,
+                "This legacy Power Pool task has no recorded reproducibility seed. "
+                "Create a new task to run with auditable randomness.",
+            )
         run = params_of(row, PowerPoolParams)
         llm = dict(run.llm)
         by = dict(llm.get("byDataset") or {})
         ids = run.dataset_ids
-        dataset = min(ids, key=lambda d: (by.get(d, {}).get("calls", 0), ids.index(d)))
+        pending = llm.get("pendingBatch")
+        if isinstance(pending, dict) and pending.get("dataset") not in ids:
+            return await _pause(
+                optimizer,
+                study_id,
+                "A saved Power Pool response no longer matches this task's dataset selection.",
+            )
+        dataset = (
+            str(pending["dataset"])
+            if isinstance(pending, dict) and pending.get("dataset") in ids
+            else min(ids, key=lambda d: (by.get(d, {}).get("calls", 0), ids.index(d)))
+        )
         model = optimizer.llm.registry.get(run.model)
         operators = await optimizer.metadata.cached_operators() or []
         ctx = await context_for(
@@ -437,7 +456,7 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
             dataset,
             FieldFilter.model_validate(run.field_filter) if run.field_filter else None,
         )
-        if model is None:
+        if model is None and not isinstance(pending, dict):
             return await _pause(
                 optimizer,
                 study_id,
@@ -457,45 +476,80 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
                 f"{dataset} is not in the downloaded catalog. Sync it, then resume.",
             )
 
-        memory = await memory_of(optimizer, study_id, dataset)
-        offset = int(by.get(dataset, {}).get("offset", 0))
-        user, shown = user_prompt(ctx, operators, run, memory, offset, model.prompt_tokens)
-        entry: dict[str, Any] = {
-            "at": utcnow().isoformat(),
-            "dataset": dataset,
-            "model": model.id,
-            "fields": shown,
-        }
-        items: list[dict[str, Any]] = []
-        answered = False
-        try:
-            answer = await optimizer.llm.generate(
-                system=POWER_POOL_LAB,
-                user=user,
-                model_ref=model.ref,
-                response_schema=SCHEMA,
-                temperature=1.0,
-            )
+        local_failed = llm.get("failed")
+        if isinstance(pending, dict):
+            offset = int(pending["offset"])
+            shown = int(pending["fields"])
+            items = list(pending.get("items") or [])
+            entry = dict(pending["entry"])
             answered = True
-            items = parse_alphas(answer.text)[:40]
-            entry["tokens"] = answer.total_tokens
-            if not items:
-                entry["error"] = "The answer was not the JSON asked for: " + answer.text[:200]
-        except BudgetExhaustedError as exc:
-            _retry[study_id] = time.monotonic() + max(5.0, exc.retry_after)
-            if exc.daily:
-                await _note(optimizer, study_id, f"Waiting for LLM budget: {exc}")
-            return None
-        except LLMError as exc:
-            _retry[study_id] = time.monotonic() + 60.0
-            entry["error"] = str(exc)[:300]
-            llm["failed"] = int(llm.get("failed") or 0) + 1
-            if llm["failed"] >= 3:
-                await _pause(optimizer, study_id, f"The LLM failed 3 times in a row: {exc}")
+        else:
+            memory = await memory_of(optimizer, study_id, dataset)
+            offset = int(by.get(dataset, {}).get("offset", 0))
+            assert model is not None
+            user, shown = user_prompt(ctx, operators, run, memory, offset, model.prompt_tokens)
+            entry = {
+                "at": utcnow().isoformat(),
+                "dataset": dataset,
+                "model": model.id,
+                "fields": shown,
+            }
+            items = []
+            answered = False
+            try:
+                answer = await optimizer.llm.generate(
+                    system=POWER_POOL_LAB,
+                    user=user,
+                    model_ref=model.ref,
+                    response_schema=SCHEMA,
+                    temperature=1.0,
+                )
+                answered = True
+                items = parse_alphas(answer.text)[:40]
+                entry["tokens"] = answer.total_tokens
+                if not items:
+                    entry["error"] = "The answer was not the JSON asked for: " + answer.text[:200]
+            except BudgetExhaustedError as exc:
+                _retry[study_id] = time.monotonic() + max(5.0, exc.retry_after)
+                if exc.daily:
+                    await _note(optimizer, study_id, f"Waiting for LLM budget: {exc}")
                 return None
+            except LLMError as exc:
+                _retry[study_id] = time.monotonic() + 60.0
+                entry["error"] = str(exc)[:300]
+                llm["failed"] = int(llm.get("failed") or 0) + 1
+                local_failed = llm["failed"]
+                if llm["failed"] >= 3:
+                    await _pause(optimizer, study_id, f"The LLM failed 3 times in a row: {exc}")
+                    return None
+
+            if answered:
+                pending = {
+                    "dataset": dataset,
+                    "offset": offset,
+                    "fields": shown,
+                    "items": items,
+                    "entry": entry,
+                }
+                # Persist the provider response before turning it into trials. If processing
+                # crashes or its transaction rolls back, the exact batch is replayed instead
+                # of making a new stochastic provider request for the same trial positions.
+                async with optimizer.lock(study_id), optimizer.db.session() as session:
+                    stored = await session.get(Study, study_id)
+                    if stored is None:
+                        return None
+                    params = params_of(stored, PowerPoolParams)
+                    stored_llm = dict(params.llm)
+                    pending = stored_llm.setdefault("pendingBatch", pending)
+                    params.llm = stored_llm
+                    stored.sampler_params = params.dump()
+                dataset = str(pending["dataset"])
+                offset = int(pending["offset"])
+                shown = int(pending["fields"])
+                items = list(pending.get("items") or [])
+                entry = dict(pending["entry"])
 
         table = operator_table(operators)
-        rng = random.Random()
         async with optimizer.lock(study_id), optimizer.db.session() as session:
             stored = await session.get(Study, study_id)
             if stored is None:
@@ -505,6 +559,19 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
             )
             seen = {t.expression for t in existing}
             number = max((t.number for t in existing), default=-1)
+            if stored.seed is None:
+                return None
+            batch_seed = derive_seed(
+                stored.task,
+                {
+                    "root_seed": stored.seed,
+                    "first_trial_number": number + 1,
+                    "dataset": dataset,
+                    "model": entry.get("model"),
+                    "field_offset": offset,
+                },
+            )
+            rng = random.Random(batch_seed)
             valid = rejected = 0
             for item in items:
                 text = str(item.get("expression") or "").strip()
@@ -544,7 +611,10 @@ async def _write(optimizer: Optimizer, study_id: int) -> None:
                         )
                     )
             params = params_of(stored, PowerPoolParams)
-            llm = dict(params.llm) | {k: llm[k] for k in ("failed",) if k in llm}
+            llm = dict(params.llm)
+            llm.pop("pendingBatch", None)
+            if not answered and local_failed is not None:
+                llm["failed"] = local_failed
             if items:
                 llm["failed"] = 0
             # A call that failed showed the model nothing: the same fields go out again next

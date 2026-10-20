@@ -32,6 +32,7 @@ from .params import (
     TASK_SAMPLERS,
     TEMPLATE_SAMPLER,
 )
+from .seeding import derive_seed, reproducibility_metadata
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -171,6 +172,8 @@ class SearchRequest(BaseModel):
     cores: int = Field(default=search.MAX_CORES, ge=1, le=search.MAX_CORES)
     #: Needed to add a task; a preview ignores it.
     simulations: int = Field(default=0, ge=0, le=search.MAX_SIMULATIONS)
+    #: Optional user seed; run identity and configuration are still mixed into the effective seed.
+    seed: int | None = Field(default=None, ge=0, le=(1 << 63) - 1)
     #: The Data Explorer's filter the datasets were chosen under: only the fields it shows are
     #: searched. Its ordering and paging are the lab's own.
     field_filter: FieldFilter | None = None
@@ -282,10 +285,10 @@ async def market_for(body: SearchRequest, state: Any, need: tuple[str, ...] = ()
 
 
 def preview_samples(
-    draw: Callable[[random.Random], SimulationRequest | None], *, tries: int
+    draw: Callable[[random.Random], SimulationRequest | None], *, tries: int, seed: int = 0
 ) -> list[SampleAlpha]:
-    """Up to :data:`SAMPLE_SIZE` Alphas a task could send, from at most ``tries`` draws."""
-    rng = random.Random()
+    """Up to SAMPLE_SIZE preview Alphas, using an explicit reproducible preview seed."""
+    rng = random.Random(seed)
     sample: list[SampleAlpha] = []
     for _ in range(tries):
         if len(sample) >= SAMPLE_SIZE:
@@ -316,6 +319,7 @@ async def add_study(
     run: bool = False,
     seeds: Callable[[int], list[Trial]] | None = None,
     objective: str | None = None,
+    seed: int | None = None,
 ) -> AddedTask:
     """Store a task: not started, or queued for the scheduler when ``run``.
 
@@ -326,14 +330,21 @@ async def add_study(
     prefix, own = _TASKS[sampler]
     objective = objective or own
     task = f"{prefix}-{now:%y%m%d%H%M%S%f}"
+    configuration = {"sampler": sampler, "params": params.dump()}
+    effective_seed = derive_seed(task, configuration, explicit_seed=seed)
+    persisted_params = params.dump()
+    persisted_params["_reproducibility"] = reproducibility_metadata(
+        task, configuration, effective_seed, explicit_seed=seed
+    )
     row = Study(
         name=f"{lab} · {task}",
         template_name=template_name or lab,
         template_source=template_source,
         sampler=sampler,
-        sampler_params=params.dump(),
+        sampler_params=persisted_params,
         objectives=[objective],
         directions=["maximize"],
+        seed=effective_seed,
         batch_size=batch_size,
         max_trials=simulations,
         task=task,

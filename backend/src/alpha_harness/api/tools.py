@@ -24,6 +24,7 @@ from ..engine.packer import MAX_BATCH
 from ..engine.slots import DEFAULT_SLOTS
 from ..labs.launch import NO_NEUTRALIZATION, AddedTask, add_study
 from ..labs.params import CORRELATION_BREAKER, SETTINGS_SAMPLER, BreakerParams, SettingsParams
+from ..labs.seeding import derive_seed
 from ..schemas import Out
 from ..tools import correlation_breaker, settings_sampler, submission_planner
 from ..vault.yields import checks_of, verdict
@@ -114,6 +115,7 @@ class PreviewRequest(BaseModel):
     test_period: str | None = Field(
         default=None, alias="testPeriod", pattern=r"^P[0-6]Y(?:[0-9]|1[01])M0D$"
     )
+    seed: int | None = Field(default=None, ge=0, le=(1 << 63) - 1)
 
     model_config = {"populate_by_name": True}
 
@@ -208,6 +210,24 @@ async def add_task(body: SampleRequest, state: State) -> AddedTask:
         for m in r["markets"]
     }
     source: dict[str, Any] = {**found["settings"], "expression": found["expression"]}
+    now = utcnow()
+    sampler_params = SettingsParams(
+        region=str(found["settings"]["region"] or ""),
+        delay=int(found["settings"]["delay"] or 0),
+        alpha_id=body.alpha_id,
+        markets=len(chosen),
+        decay=int(found["settings"]["decay"] or 0),
+        truncation=float(found["settings"]["truncation"] or 0.08),
+        truncation_agent=body.truncation_agent,
+        nan_handling=str(found["settings"]["nanHandling"] or "ON"),
+        test_period=str(found["settings"]["testPeriod"] or ""),
+        cores=body.cores,
+    )
+    run_identity = f"settings-sampler-{now:%y%m%d%H%M%S%f}"
+    run_configuration = {"sampler": SETTINGS_SAMPLER, "params": sampler_params.dump()}
+    effective_seed = derive_seed(
+        run_identity, run_configuration, explicit_seed=body.seed
+    )
     requests = settings_sampler.expand(
         found["regions"],
         chosen,
@@ -216,6 +236,7 @@ async def add_task(body: SampleRequest, state: State) -> AddedTask:
         source,
         market_neutral_only=body.market_neutral_only,
         truncation_agent=body.truncation_agent,
+        seed=effective_seed,
     )
     if not requests:
         raise refuse(
@@ -225,23 +246,11 @@ async def add_task(body: SampleRequest, state: State) -> AddedTask:
             "Max Trade / Max Position pair.",
         )
 
-    markets = len(chosen)
     return await add_study(
         state,
-        now=utcnow(),
+        now=now,
         sampler=SETTINGS_SAMPLER,
-        params=SettingsParams(
-            region=str(found["settings"]["region"] or ""),
-            delay=int(found["settings"]["delay"] or 0),
-            alpha_id=body.alpha_id,
-            markets=markets,
-            decay=int(found["settings"]["decay"] or 0),
-            truncation=float(found["settings"]["truncation"] or 0.08),
-            truncation_agent=body.truncation_agent,
-            nan_handling=str(found["settings"]["nanHandling"] or "ON"),
-            test_period=str(found["settings"]["testPeriod"] or ""),
-            cores=body.cores,
-        ),
+        params=sampler_params,
         simulations=len(requests),
         # One batch more than the cores can run, so a finished batch is replaced from the
         # queue on the engine's next 2s tick instead of waiting out the scheduler's 5s poll.
@@ -250,6 +259,7 @@ async def add_task(body: SampleRequest, state: State) -> AddedTask:
         template_source=found["expression"],
         template_name=f"Settings Sampler · {body.alpha_id or 'Expression'}",
         seeds=settings_sampler.seed_trials(requests, has_source=bool(body.alpha_id)),
+        seed=body.seed,
     )
 
 

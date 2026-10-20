@@ -40,6 +40,7 @@ from ..labs.params import (
     TEMPLATE_SAMPLER,
     task_params,
 )
+from ..labs.seeding import reproducibility_known
 from ..labs.study import ranked
 from ..schemas import Out
 from ..tasks import Task
@@ -100,6 +101,10 @@ class LabTask(Out):
     status: StudyStatus
     stopping: bool
     message: str | None
+    #: Legacy records without metadata are not represented as reproducible.
+    seed: int | None = None
+    seed_derivation_version: str | None = None
+    reproducibility_known: bool = False
     region: str | None
     delay: int | None
     #: Settings Sampler only: what the sweep holds fixed, and where it came from.
@@ -375,6 +380,8 @@ def _task(row: Study, progress: dict[str, Any]) -> LabTask:
     # Read raw on purpose: this only displays, and one malformed old row must not take the
     # whole Tasks list down with a validation error.
     params = row.sampler_params or {}
+    seed_metadata = params.get("_reproducibility")
+    known_seed = reproducibility_known(row.seed, seed_metadata)
     states = progress["states"]
     told = states.get(TrialState.COMPLETE, 0) + states.get(TrialState.FAIL, 0)
     template = row.sampler == TEMPLATE_SAMPLER
@@ -390,6 +397,11 @@ def _task(row: Study, progress: dict[str, Any]) -> LabTask:
             "status": row.status,
             "stopping": bool(params.get("stopping")),
             "message": row.message,
+            "seed": row.seed,
+            "seedDerivationVersion": (
+                seed_metadata.get("derivation_version") if known_seed else None
+            ),
+            "reproducibilityKnown": known_seed,
             "region": params.get("region"),
             "delay": params.get("delay"),
             "universe": params.get("universe"),

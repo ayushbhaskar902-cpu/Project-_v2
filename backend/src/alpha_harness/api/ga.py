@@ -62,6 +62,7 @@ class EvolutionRequest(BaseModel):
     mutation_rate: float = Field(default=ga.MUTATION_RATE, ge=0.01, le=0.2)
     #: Needed to add a task; a preview uses it to size the population.
     simulations: int = Field(default=0, ge=0, le=search.MAX_SIMULATIONS)
+    seed: int | None = Field(default=None, ge=0, le=(1 << 63) - 1)
 
 
 class AutoSeedsRequest(BaseModel):
@@ -210,7 +211,7 @@ async def _plan(body: EvolutionRequest, state: Any) -> dict[str, Any]:
             made = ga.child(rng, rng.choice(parents), rng.choice(parents), bred, body.mutation_rate)
             return ga.request_for(*made, run) if made else None
 
-        sample = preview_samples(draw, tries=50)
+        sample = preview_samples(draw, tries=50, seed=body.seed or 0)
 
     population = ga.population_for(body.simulations, body.population)
     return {
@@ -391,4 +392,5 @@ async def add_task(body: EvolutionRequest, state: State) -> AddedTask:
         batch_size=body.cores * 10,
         template_source="# Evolution Lab breeds from seed Alphas; there is no template.",
         seeds=generation_zero,
+        seed=body.seed,
     )

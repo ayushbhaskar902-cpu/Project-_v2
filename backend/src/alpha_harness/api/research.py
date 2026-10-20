@@ -849,10 +849,10 @@ async def run_robustness_suite(
 ) -> dict[str, Any]:
     """Generates and executes perturbation test suites for evaluated candidates.
 
-    For each candidate, generates neutralization, decay, and universe perturbation
-    tests and records perturbed metric results. In production, each perturbation
-    would re-simulate on BRAIN; here synthetic results are generated from the
-    baseline with realistic degradation.
+    For each candidate, requests neutralization, decay, and universe perturbations from
+    BRAIN and records metrics only after verified AlphaVault result ingestion. Unavailable
+    or unsupported perturbations remain explicitly NOT_RUN or UNSUPPORTED; synthetic
+    degradation metrics are never produced here.
     """
     return await ResearchWorkflowService(state).robustness(session_id, payload)
 

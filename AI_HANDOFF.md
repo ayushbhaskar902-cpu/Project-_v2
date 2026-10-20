@@ -3,7 +3,7 @@
 **Repository:** `https://github.com/ayushbhaskar902-cpu/Project-_v2.git`  
 **Target Branch:** `main`  
 **Current Date:** October 20, 2026  
-**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, and P2-01 through P2-04 are **VERIFIED COMPLETE**. P2-04 passed the independent GitHub runner at source commit `7fd19e3d6343ed74a48d302b3bb918422b718c79`: 353 backend tests, 9 frontend status tests, `pnpm check`, and `pnpm build`; 39 async teardown warnings remain tracked as `DEFERRED-TEST-01`. P2-05 remains audited and paused pending review/approval.
+**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, and P2-01 through P2-04 are **VERIFIED COMPLETE**. P2-04 passed the independent GitHub runner at source commit `7fd19e3d6343ed74a48d302b3bb918422b718c79`: 353 backend tests, 9 frontend status tests, `pnpm check`, and `pnpm build`; 39 async teardown warnings remain tracked as `DEFERRED-TEST-01`. P2-05 implementation is in progress on `wip/p2-05-reproducible-seeds` and remains **UNVERIFIED** pending independent runner results. P2-06 has not been implemented and is for audit review next.
 
 ---
 
@@ -94,8 +94,8 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 | **P2-02** | Simulation timeout & cancellation handling | ⬜ Tracked |
 | **P2-03** | Researcher failures may be converted into missing output | ✅ **VERIFIED COMPLETE** |
 | **P2-04** | BRAIN result backfill failure is not a terminally modeled state | ✅ **VERIFIED COMPLETE** |
-| **P2-05** | Reproducibility is compromised by randomized synthetic seeds | 🔍 **AUDITED — PENDING APPROVAL** |
-| **P2-06** | Datafield search semantic indexing & ranking | ⬜ Tracked |
+| **P2-05** | Reproducibility is compromised by randomized synthetic seeds | ⚙️ **IMPLEMENTED — UNVERIFIED** |
+| **P2-06** | Composite score is hard-coded without calibrated justification | 🔍 **NEXT AUDIT — NOT IMPLEMENTED** |
 | **P2-07** | Automated repair logging & repair cycle detection | ⬜ Tracked |
 | **P2-08** | Multi-session concurrency & researcher pool isolation | ⬜ Tracked |
 | **P2-09** | Alpha expression normalization & semantic equivalence | ⬜ Tracked |
@@ -108,9 +108,9 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 
 ---
 
-## 4. Next Step: Review P2-05 Before Any Implementation
+## 4. Next Step: Verify P2-05, Then Audit P2-06
 
-P2-01 and P2-02 implementation work is documented in [`docs/remediation/reports/p2_01_final_verification_report.md`](docs/remediation/reports/p2_01_final_verification_report.md) and [`docs/remediation/reports/p2_02_final_verification_report.md`](docs/remediation/reports/p2_02_final_verification_report.md). P2-03 is verified in [`docs/remediation/reports/p2_03_final_verification_report.md`](docs/remediation/reports/p2_03_final_verification_report.md). P2-04 is verified in [`docs/remediation/reports/p2_04_final_verification_report.md`](docs/remediation/reports/p2_04_final_verification_report.md). The P2-05 audit is recorded in [`docs/remediation/reports/p2_05_audit_report.md`](docs/remediation/reports/p2_05_audit_report.md); keep implementation paused until that audit is reviewed and approved.
+P2-01 and P2-02 implementation work is documented in [`docs/remediation/reports/p2_01_final_verification_report.md`](docs/remediation/reports/p2_01_final_verification_report.md) and [`docs/remediation/reports/p2_02_final_verification_report.md`](docs/remediation/reports/p2_02_final_verification_report.md). P2-03 and P2-04 verification reports are also recorded in `docs/remediation/reports/`. P2-05 implementation and its audit rationale are in [`docs/remediation/reports/p2_05_audit_report.md`](docs/remediation/reports/p2_05_audit_report.md), but it remains unverified until the independent test run completes. After that, prepare P2-06's audit for review only; do not implement P2-06 without approval.
 
 ### P2-03 Verification Summary
 P2-03 now creates a durable `RUNNING` `GenerationAttempt` before each researcher provider call, records terminal provider/validation/cancellation/orchestration outcomes, applies bounded transient retries, preserves successful siblings and candidate lineage, exposes additive partial-round status through the API/UI, and recovers stale attempts. Focused P2-03 tests: 4 passed. Relevant regression tests: 146 passed with 1 existing async warning. Full backend suite: 343 passed, 21 existing async teardown warnings, exit code 0.

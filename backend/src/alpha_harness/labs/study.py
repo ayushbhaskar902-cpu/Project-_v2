@@ -414,6 +414,11 @@ class Optimizer:
         cached = self.studies.get(study_id)
         if cached is not None:
             return cached
+        if row.seed is None:
+            raise ValueError(
+                "This legacy task has no recorded reproducibility seed. Create a new task "
+                "rather than continuing with untracked randomness."
+            )
 
         async with self.db.session() as session:
             history = [
@@ -442,6 +447,7 @@ class Optimizer:
         from optuna.samplers import TPESampler
 
         sampler = TPESampler(
+            seed=row.seed,
             n_startup_trials=params_of(row, SearchParams).n_startup_trials,
             multivariate=True,
             group=True,

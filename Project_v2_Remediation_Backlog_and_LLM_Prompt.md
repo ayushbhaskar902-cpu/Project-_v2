@@ -222,10 +222,12 @@
 
 ### P2-05 — Reproducibility is compromised by randomized synthetic seeds
 
-**Area:** synthetic fallback/robustness code.  
-**Problem:** `hash(...)`-based random seeds may vary between Python processes and are being used in pathways that should not exist in production.  
-**Fix:** First remove synthetic metrics from production. For remaining test fixtures, derive stable seeds from a stable hash such as SHA-256 of canonical identifiers/configuration. Persist all random seeds and experiment config.  
-**Acceptance tests:** Same fixture/config yields identical output across fresh processes; distinct configs have distinct stable seeds.
+**Area:** randomized laboratory generation and robustness-route documentation.
+**Problem:** Several research generators used unseeded `random.Random()` or module-global shuffles, so persisted trial proposals could not be reproduced. The robustness route also had a stale docstring claiming synthetic metrics were produced; source review did not confirm synthetic robustness evidence entering production. No process-randomized Python `hash(...)` seed was found; the remaining `hash(...)` calls are DuckDB SQL functions, not Python seed derivation.
+**Fix:** Preserve the verified real-BRAIN robustness boundary and correct the stale documentation. Use versioned SHA-256 derivation over a unique persisted run identity and canonical configuration, persist the effective seed/version/config, and use explicit local RNGs for output-affecting laboratory randomness. Do not silently run legacy experiments that lack reproducibility metadata.
+**Acceptance tests:** Same identity/config/seed reproduces across fresh processes and `PYTHONHASHSEED` values; distinct identities/configurations produce distinct derived seeds; metadata is persisted and surfaced; lab generators and retries reuse explicit seeds; historical records without metadata remain marked unknown; synthetic robustness rows remain excluded from genuine evidence.
+
+**Verification:** IMPLEMENTED — **UNVERIFIED** pending independent P2-05 targeted, regression, and full-backend runs. See `docs/remediation/reports/p2_05_audit_report.md`; no completion claim until all acceptance criteria are evidenced.
 
 ### P2-06 — Composite score is hard-coded without calibrated justification
 

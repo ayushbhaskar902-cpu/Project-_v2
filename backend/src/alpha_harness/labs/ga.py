@@ -62,6 +62,7 @@ from .fastexpr import (
 )
 from .objectives import FAILURE
 from .params import EvolutionParams, params_of
+from .seeding import derive_seed
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Awaitable, Callable
@@ -584,7 +585,7 @@ async def _parents(optimizer: Optimizer, ranked: list[Trial], limit: int) -> lis
 
 
 async def breed(
-    optimizer: Optimizer, row: Study, want: int
+    optimizer: Optimizer, row: Study, want: int, *, seed: int | None = None
 ) -> list[tuple[dict[str, Any], SimulationRequest]]:
     """Up to ``want`` new children of the best, mutually uncorrelated Alphas scored so far."""
     run = params_of(row, EvolutionParams)
@@ -639,7 +640,19 @@ async def breed(
         lambda: {ga_key(e, json.loads(s or "null")) for e, s in identities}
     )
     rate = run.mutation_rate or MUTATION_RATE
-    rng = random.Random()
+    root_seed = seed if seed is not None else row.seed
+    if root_seed is None:
+        raise ValueError("This legacy Evolution study has no recorded seed; requeue it manually.")
+    generation_seed = derive_seed(
+        row.task,
+        {
+            "root_seed": root_seed,
+            "generation": generation,
+            "parents": [p.alpha_id for p in parents],
+            "mutation_rate": rate,
+        },
+    )
+    rng = random.Random(generation_seed)
     out: list[tuple[dict[str, Any], SimulationRequest]] = []
     for _ in range(want * 10):
         if len(out) >= want:

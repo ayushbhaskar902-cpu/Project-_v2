@@ -426,6 +426,16 @@ def market_neutral(neutralization: str, trade: str, position: str) -> bool:
     return neutralization != NO_NEUTRALIZATION or trade == "ON" or position == "ON"
 
 
+def shuffle_batches(
+    full: list[tuple[Any, ...]], tails: list[tuple[Any, ...]], *, seed: int
+) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+    """Shuffle only complete batches and tails using the persisted run seed."""
+    rng = random.Random(seed)
+    rng.shuffle(full)
+    rng.shuffle(tails)
+    return full, tails
+
+
 def expand(
     plan_rows: list[dict[str, Any]],
     chosen: set[tuple[str, int, str]],
@@ -433,6 +443,7 @@ def expand(
     pairs: set[tuple[str, str]],
     source: dict[str, Any],
     *,
+    seed: int,
     market_neutral_only: bool = True,
     truncation_agent: bool = False,
 ) -> list[SimulationRequest]:
@@ -532,8 +543,7 @@ def expand(
                 head = [first, *(r for r in chunk if r is not first)]
             else:
                 (full if len(chunk) == MAX_BATCH else tails).append(chunk)
-    random.shuffle(full)
-    random.shuffle(tails)
+    full, tails = shuffle_batches(full, tails, seed=seed)
     return [*head, *(request for chunk in (*full, *tails) for request in chunk)]
 
 
