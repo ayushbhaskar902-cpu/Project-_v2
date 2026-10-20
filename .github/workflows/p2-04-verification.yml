@@ -110,6 +110,11 @@ jobs:
       - name: Install locked frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
+      - name: Frontend component tests
+        id: frontend_tests
+        continue-on-error: true
+        working-directory: frontend
+        run: pnpm test
       - name: Frontend checks
         id: frontend_check
         continue-on-error: true
@@ -149,6 +154,7 @@ jobs:
           P202: ${{ steps.p202.outcome }}
           P203: ${{ steps.p203.outcome }}
           BACKEND: ${{ steps.backend.outcome }}
+          FRONTEND_TESTS: ${{ steps.frontend_tests.outcome }}
           FRONTEND_CHECK: ${{ steps.frontend_check.outcome }}
           FRONTEND_BUILD: ${{ steps.frontend_build.outcome }}
         run: |
@@ -194,12 +200,13 @@ jobs:
               encoding="utf-8",
           )
           PY
-          printf 'Recorded outcomes: P2-04=%s P2-01=%s P0=%s P1=%s P2-02=%s P2-03=%s backend=%s frontend-check=%s frontend-build=%s\n' \
-            "$P204" "$P201" "$P0" "$P1" "$P202" "$P203" "$BACKEND" "$FRONTEND_CHECK" "$FRONTEND_BUILD"
-          echo "::error title=Underlying verification outcomes::P2-04=$P204, P2-01=$P201, P0=$P0, P1=$P1, P2-02=$P202, P2-03=$P203, backend=$BACKEND, frontend-check=$FRONTEND_CHECK, frontend-build=$FRONTEND_BUILD"
+          printf 'Recorded outcomes: P2-04=%s P2-01=%s P0=%s P1=%s P2-02=%s P2-03=%s backend=%s frontend-tests=%s frontend-check=%s frontend-build=%s\n' \
+            "$P204" "$P201" "$P0" "$P1" "$P202" "$P203" "$BACKEND" "$FRONTEND_TESTS" "$FRONTEND_CHECK" "$FRONTEND_BUILD"
+          echo "::error title=Underlying verification outcomes::P2-04=$P204, P2-01=$P201, P0=$P0, P1=$P1, P2-02=$P202, P2-03=$P203, backend=$BACKEND, frontend-tests=$FRONTEND_TESTS, frontend-check=$FRONTEND_CHECK, frontend-build=$FRONTEND_BUILD"
           test "$P204" = success && test "$P201" = success && test "$P0" = success \
             && test "$P1" = success && test "$P202" = success && test "$P203" = success \
-            && test "$BACKEND" = success && test "$FRONTEND_CHECK" = success && test "$FRONTEND_BUILD" = success
+            && test "$BACKEND" = success && test "$FRONTEND_TESTS" = success \
+            && test "$FRONTEND_CHECK" = success && test "$FRONTEND_BUILD" = success
 
   frontend-baseline:
     runs-on: ubuntu-latest

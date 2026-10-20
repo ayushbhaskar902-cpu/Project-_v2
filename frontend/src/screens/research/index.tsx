@@ -13,103 +13,17 @@ import {
   BrainIcon,
   CheckCircle2Icon,
   CpuIcon,
-  DatabaseIcon,
-  GlobeIcon,
   LayersIcon,
   LightbulbIcon,
   PlayIcon,
-  PlusIcon,
-  RefreshCwIcon,
-  SlidersHorizontalIcon,
   SparklesIcon,
   TrophyIcon,
   XCircleIcon,
-  XIcon,
 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { Badge, Button, Page, PageHeader, Panel } from '@/ui/kit'
-
-const REGION_UNIVERSES: Record<string, string[]> = {
-  USA: ['TOP3000', 'TOP1000', 'TOP500', 'MINVOL1M'],
-  EUR: ['TOP2500', 'TOP1200', 'STOXX600'],
-  ASI: ['TOP1000', 'TOP500', 'MINVOL1M'],
-  CHN: ['TOP3000', 'TOP1000', 'TOP500'],
-  GLB: ['TOP3000', 'TOP1000'],
-}
-
-const CAMPAIGN_PRESETS = [
-  {
-    name: 'US Fundamental Quality & Cash Flow',
-    prompt: 'Discover profitable alphas leveraging cash flow yield, ROIC quality, and balance sheet strength.',
-    region: 'USA',
-    universe: 'TOP3000',
-    delay: 1,
-    neutralization: 'INDUSTRY',
-    decay: 4,
-  },
-  {
-    name: 'US Analyst Revision & Momentum',
-    prompt: 'Exploit consensus EPS revisions, price target upgrades, and residual momentum anomalies.',
-    region: 'USA',
-    universe: 'TOP1000',
-    delay: 1,
-    neutralization: 'INDUSTRY',
-    decay: 4,
-  },
-  {
-    name: 'European Quality & Dividend Yield',
-    prompt: 'Target high-payout, low-leverage European equities with stable EBITDA and earnings yield.',
-    region: 'EUR',
-    universe: 'TOP1200',
-    delay: 1,
-    neutralization: 'SECTOR',
-    decay: 4,
-  },
-  {
-    name: 'Asian Liquidity & Retail Reversion',
-    prompt: 'Capture retail order flow shocks, turnover velocity extremes, and mean reversion in Asian markets.',
-    region: 'ASI',
-    universe: 'TOP1000',
-    delay: 1,
-    neutralization: 'INDUSTRY',
-    decay: 2,
-  },
-  {
-    name: 'China A-Share Momentum & Margin Flow',
-    prompt: 'Capitalize on margin financing balance changes, turnover spikes, and price momentum in China A-shares.',
-    region: 'CHN',
-    universe: 'TOP1000',
-    delay: 1,
-    neutralization: 'SUBINDUSTRY',
-    decay: 4,
-  },
-  {
-    name: 'Global Cross-Border Value',
-    prompt: 'Normalize enterprise multiple and book yield across global equities with country risk neutralization.',
-    region: 'GLB',
-    universe: 'TOP3000',
-    delay: 1,
-    neutralization: 'MARKET',
-    decay: 6,
-  },
-]
-
-const DATASET_CATEGORIES = [
-  { id: 'fundamental', label: 'Fundamental & Accounting' },
-  { id: 'analyst', label: 'Analyst Estimates & Consensus' },
-  { id: 'sentiment', label: 'News & Social Media Sentiment' },
-  { id: 'short_interest', label: 'Short Interest & Borrow Fees' },
-  { id: 'price_volume', label: 'Price / Volume & Liquidity' },
-  { id: 'risk_factors', label: 'Style & Risk Factors (Barra)' },
-]
-
-const MODEL_OPTIONS = [
-  { ref: 'google:gemini-2.5-pro', label: 'Gemini 2.5 Pro (Momentum)', desc: 'Macro trends, multi-period momentum' },
-  { ref: 'google:gemini-2.5-flash', label: 'Gemini 2.5 Flash (Reversion)', desc: 'Fast statistical reversion & micro-signals' },
-  { ref: 'openai:gpt-4o', label: 'GPT-4o (Fundamental Value)', desc: 'Financial ratio decomposition & cash flows' },
-  { ref: 'deepseek:deepseek-chat', label: 'DeepSeek Chat (Multi-Factor)', desc: 'Nonlinear multi-factor interactions' },
-]
+import { EvaluationJobStatus, fetchEvaluationJobs } from './evaluation-job-status'
 
 interface SessionSummary {
   id: number
@@ -209,7 +123,14 @@ interface EvaluationJob {
   simulationAttempt: number
   platformJobId: string | null
   alphaId: string | null
-  status: 'QUEUED' | 'SUBMITTED' | 'SIMULATING' | 'RESULT_BACKFILL' | 'EVALUABLE' | 'EVALUATED' | 'FAILED'
+  status:
+    | 'QUEUED'
+    | 'SUBMITTED'
+    | 'SIMULATING'
+    | 'RESULT_BACKFILL'
+    | 'EVALUABLE'
+    | 'EVALUATED'
+    | 'FAILED'
   settingsHash: string | null
   provenanceHash: string | null
   retryCount: number
@@ -290,45 +211,22 @@ export function ResearchStudioScreen() {
   const [maxCorr, setMaxCorr] = useState(0.6)
   const [targetPoolSize, setTargetPoolSize] = useState(50)
 
-  // New Campaign Modal State
-  const [isNewCampaignOpen, setIsNewCampaignOpen] = useState(false)
-  const [newName, setNewName] = useState('US Fundamental Quality')
-  const [newPrompt, setNewPrompt] = useState(
-    'Discover profitable cross-sectional equity alphas combining valuation, cash flow, and momentum.',
-  )
-  const [newRegion, setNewRegion] = useState('USA')
-  const [newUniverse, setNewUniverse] = useState('TOP3000')
-  const [newDelay, setNewDelay] = useState(1)
-  const [newNeutralization, setNewNeutralization] = useState('INDUSTRY')
-  const [newDecay, setNewDecay] = useState(4)
-  const [newSelectedModels, setNewSelectedModels] = useState<string[]>([
-    'google:gemini-2.5-pro',
-    'google:gemini-2.5-flash',
-    'openai:gpt-4o',
-    'deepseek:deepseek-chat',
-  ])
-  const [newSelectedCategories, setNewSelectedCategories] = useState<string[]>([
-    'fundamental',
-    'analyst',
-    'sentiment',
-    'price_volume',
-  ])
-  const [isCreatingCampaign, setIsCreatingCampaign] = useState(false)
-
   // Durable evaluation status; polling is read-only and survives refreshes.
   const [evaluationJobs, setEvaluationJobs] = useState<EvaluationJob[]>([])
   const [generationSummary, setGenerationSummary] = useState<GenerationRoundSummary | null>(null)
 
   const loadEvaluationJobs = useCallback(async (sid: number) => {
     try {
-      const res = await fetch(`/api/research/sessions/${sid}/evaluation-jobs`, {
-        headers: { 'sec-fetch-site': 'same-origin' },
-      })
+      const res = await fetchEvaluationJobs(sid)
       if (res.ok) setEvaluationJobs(await res.json())
     } catch (err) {
       console.error('Failed to load evaluation jobs:', err)
     }
   }, [])
+
+  const handleRefreshEvaluationStatus = () => {
+    if (selectedSessionId !== null) void loadEvaluationJobs(selectedSessionId)
+  }
 
   // Fetch sessions on load
   const loadSessions = useCallback(async () => {
@@ -457,8 +355,12 @@ export function ResearchStudioScreen() {
       if (res.ok) {
         const data = await res.json()
         setEvaluationJobs(data.jobs ?? [])
-        const pending = (data.jobs ?? []).filter((job: EvaluationJob) => !['EVALUATED', 'FAILED'].includes(job.status)).length
-        const failed = (data.jobs ?? []).filter((job: EvaluationJob) => job.status === 'FAILED').length
+        const pending = (data.jobs ?? []).filter(
+          (job: EvaluationJob) => !['EVALUATED', 'FAILED'].includes(job.status),
+        ).length
+        const failed = (data.jobs ?? []).filter(
+          (job: EvaluationJob) => job.status === 'FAILED',
+        ).length
         if (pending > 0) {
           toast.info('Simulations Dispatched to BRAIN', {
             description: `${pending} evaluation job${pending === 1 ? '' : 's'} awaiting verified simulation results.`,
@@ -468,7 +370,9 @@ export function ResearchStudioScreen() {
             `BRAIN Backtest Evaluation Complete: ${data.evaluatedCount} alphas (${data.submissionGradeCount} internal quality passes)`,
           )
         } else if (failed > 0) {
-          toast.error('Some evaluation jobs failed', { description: `${failed} job${failed === 1 ? '' : 's'} need attention.` })
+          toast.error('Some evaluation jobs failed', {
+            description: `${failed} job${failed === 1 ? '' : 's'} need attention.`,
+          })
         } else {
           toast.info('Evaluation Status', {
             description: data.message || 'No completed BRAIN simulations to evaluate yet.',
@@ -494,7 +398,9 @@ export function ResearchStudioScreen() {
     const interval = setInterval(async () => {
       const before = evaluationJobs
       await loadEvaluationJobs(selectedSessionId)
-      const becameEvaluated = before.some((oldJob) => oldJob.status !== 'EVALUATED' && oldJob.status !== 'FAILED')
+      const becameEvaluated = before.some(
+        (oldJob) => oldJob.status !== 'EVALUATED' && oldJob.status !== 'FAILED',
+      )
       if (becameEvaluated) {
         await loadSessionData(selectedSessionId)
         await loadSessions()
@@ -503,61 +409,6 @@ export function ResearchStudioScreen() {
 
     return () => clearInterval(interval)
   }, [evaluationJobs, selectedSessionId, loadEvaluationJobs, loadSessionData, loadSessions])
-
-  const handleCreateCampaign = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!newName.trim()) {
-      toast.error('Campaign name is required')
-      return
-    }
-    if (newSelectedModels.length === 0) {
-      toast.error('Please select at least one researcher model')
-      return
-    }
-
-    setIsCreatingCampaign(true)
-    try {
-      const res = await fetch('/api/research/sessions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'sec-fetch-site': 'same-origin',
-          'x-harness-client': '1',
-        },
-        body: JSON.stringify({
-          name: newName.trim(),
-          prompt: newPrompt.trim(),
-          instrument_type: 'EQUITY',
-          region: newRegion,
-          universe: newUniverse,
-          delay: Number(newDelay),
-          simulation_budget: 500,
-          learning_frequency: 80,
-          model_refs: newSelectedModels,
-          constraints: {
-            neutralization: newNeutralization,
-            decay: Number(newDecay),
-            dataset_categories: newSelectedCategories,
-          },
-        }),
-      })
-
-      if (res.ok) {
-        const created = await res.json()
-        toast.success(`Campaign created: ${created.name} (${newRegion}/${newUniverse})`)
-        setIsNewCampaignOpen(false)
-        await loadSessions()
-        setSelectedSessionId(created.id)
-      } else {
-        const err = await res.json().catch(() => ({ detail: 'Failed to create campaign' }))
-        toast.error('Failed to create campaign', { description: String(err.detail || 'Server error') })
-      }
-    } catch (err) {
-      toast.error('Campaign creation error', { description: String(err) })
-    } finally {
-      setIsCreatingCampaign(false)
-    }
-  }
 
   const handleTriggerLearningCycle = async () => {
     if (!selectedSessionId) return
@@ -638,14 +489,6 @@ export function ResearchStudioScreen() {
         description="Autonomous quantitative research laboratory. Heterogeneous LLM researcher agents collaborate, generate AST-validated Fast Expressions, evaluate 10-year simulation metrics, and self-learn optimal alpha strategies."
         actions={
           <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              onClick={() => setIsNewCampaignOpen(true)}
-              className="border-primary/40 text-primary hover:border-primary"
-            >
-              <PlusIcon className="mr-1.5 h-3.5 w-3.5" />
-              New Campaign
-            </Button>
             {sessions.length > 0 && (
               <select
                 value={selectedSessionId ?? ''}
@@ -687,67 +530,30 @@ export function ResearchStudioScreen() {
         }
       />
 
-      {/* Durable evaluation status banner */}
-      {evaluationJobs.length > 0 && (
-        <div className="mb-4 flex items-center justify-between rounded-lg border border-status-running/40 bg-status-running/10 px-4 py-3 text-caption text-ink">
-          <div className="flex items-center gap-3">
-            <RefreshCwIcon className={`h-4 w-4 ${evaluationJobs.some((job) => !['EVALUATED', 'FAILED'].includes(job.status)) ? 'animate-spin text-status-running' : 'text-ink-subtle'}`} />
-            <div>
-              <span className="font-semibold text-ink">
-                {evaluationJobs.filter((job) => job.status === 'EVALUATED').length}/{evaluationJobs.length} evaluation jobs ready or complete.
-              </span>
-              <span className="ml-2 text-ink-subtle">
-                Current phases: {Array.from(new Set(evaluationJobs.map((job) => job.backfillStatus || job.status))).join(', ')}. Read-only status refreshes every 10s.
-              </span>
-              <div className="mt-2 space-y-1">
-                {evaluationJobs.map((job) => {
-                  const waiting = job.status !== 'EVALUATED' && job.status !== 'FAILED'
-                  const label = job.status === 'EVALUATED'
-                    ? 'Ready and evaluated'
-                    : job.backfillStatus === 'RETRY_SCHEDULED'
-                      ? `Retry scheduled${job.nextRetryAt ? ` at ${new Date(job.nextRetryAt).toLocaleTimeString()}` : ''}`
-                      : job.backfillStatus === 'REVIEW_REQUIRED'
-                        ? 'Review required'
-                        : job.backfillStatus === 'TERMINAL_FAILURE'
-                          ? 'Terminal failure'
-                          : job.backfillStatus === 'COMPLETE'
-                            ? 'Artifacts verified; evaluation pending'
-                            : job.backfillStatus === 'IN_PROGRESS'
-                              ? 'Retrieving result artifacts'
-                              : 'Waiting for verified result artifacts'
-                  return (
-                    <div key={job.jobId} className={`text-[11px] ${waiting ? 'text-ink-subtle' : job.status === 'FAILED' ? 'text-pnl-negative-text' : 'text-pnl-positive-text'}`}>
-                      Job #{job.jobId}: {label}{job.lastError ? ` — ${job.lastError}` : ''}
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          </div>
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={isSimulating}
-            onClick={handleSimulateCandidates}
-          >
-              Refresh Status
-          </Button>
-        </div>
-      )}
+      <EvaluationJobStatus
+        jobs={evaluationJobs}
+        onRefresh={handleRefreshEvaluationStatus}
+        refreshing={false}
+      />
 
       {generationSummary && generationSummary.attemptedResearchers > 0 && (
         <div className="mb-4 rounded-lg border border-status-warning/40 bg-status-warning/10 px-4 py-3 text-caption text-ink">
           <div className="font-semibold">
-            Research round: {generationSummary.successfulResearchers} succeeded, {generationSummary.failedResearchers} failed, {generationSummary.cancelledResearchers} cancelled.
+            Research round: {generationSummary.successfulResearchers} succeeded,{' '}
+            {generationSummary.failedResearchers} failed, {generationSummary.cancelledResearchers}{' '}
+            cancelled.
           </div>
           <div className="mt-1 text-ink-subtle">
-            {generationSummary.generatedCandidates} candidates returned; {generationSummary.emptyOutputResearchers} researcher(s) returned no output. Failed attempts remain available in durable attempt records.
+            {generationSummary.generatedCandidates} candidates returned;{' '}
+            {generationSummary.emptyOutputResearchers} researcher(s) returned no output. Failed
+            attempts remain available in durable attempt records.
           </div>
           {generationSummary.failureDetails.length > 0 && (
             <div className="mt-2 text-ink-subtle">
               {generationSummary.failureDetails.map((failure) => (
                 <div key={failure.attemptId}>
-                  Attempt {failure.attemptId} ({failure.modelRef}): {failure.errorMessage || failure.validationOutcome || failure.status}
+                  Attempt {failure.attemptId} ({failure.modelRef}):{' '}
+                  {failure.errorMessage || failure.validationOutcome || failure.status}
                 </div>
               ))}
             </div>
