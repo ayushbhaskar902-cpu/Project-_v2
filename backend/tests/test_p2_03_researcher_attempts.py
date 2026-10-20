@@ -3,15 +3,23 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+from sqlalchemy import select
+
 from alpha_harness.db.models import (
     GenerationAttempt,
     GenerationAttemptStatus,
+    ResearchCandidate,
     ResearchResearcher,
     ResearchSession,
+    ResearchStatus,
     utcnow,
 )
 from alpha_harness.db.sqlite import Database
-from alpha_harness.generator.pipeline import GenerationBatch
+from alpha_harness.generator.pipeline import (
+    CandidateValidationResult,
+    GeneratedCandidate,
+    GenerationBatch,
+)
 from alpha_harness.orchestrator.researchers import MultiLLMOrchestrator
 
 
@@ -48,6 +56,33 @@ def _batch(*candidates: SimpleNamespace) -> GenerationBatch:
         summary="test",
         candidates=list(candidates),
         model_ref="test:model",
+        total_tokens=12,
+        duration_seconds=0.1,
+    )
+
+
+def _valid_batch(model_ref: str) -> GenerationBatch:
+    validation = CandidateValidationResult(
+        is_valid=True,
+        expression="rank(close)",
+        operator_count=1,
+        field_count=1,
+        fields_used=["close"],
+    )
+    return GenerationBatch(
+        summary="test",
+        candidates=[
+            GeneratedCandidate(
+                hypothesis="test hypothesis",
+                expression="rank(close)",
+                category="general",
+                target_dataset=None,
+                primary_fields=["close"],
+                validation=validation,
+                raw_response={"expression": "rank(close)"},
+            )
+        ],
+        model_ref=model_ref,
         total_tokens=12,
         duration_seconds=0.1,
     )
@@ -166,5 +201,159 @@ def test_p2_03_stale_running_attempts_are_recovered(tmp_path: Path):
             assert recovered.error_class == "StaleAttemptRecovery"
             assert recovered.validation_outcome == "STALE_RECOVERED"
         await db.dispose()
+
+    asyncio.run(run())
+
+
+def test_p2_03_persists_before_provider_and_keeps_sibling_success(tmp_path: Path):
+    async def run():
+        db = Database(tmp_path / "partial.db")
+        await db.create_all()
+        observed_running: list[bool] = []
+
+        class Pipeline:
+            async def generate_batch(self, **kwargs):
+                async with db.session() as session:
+                    running = await session.scalar(
+                        select(GenerationAttempt.id).where(
+                            GenerationAttempt.model_ref == kwargs["model_ref"],
+                            GenerationAttempt.status == GenerationAttemptStatus.RUNNING,
+                        )
+                    )
+                observed_running.append(running is not None)
+                if kwargs["model_ref"] == "test:failed":
+                    raise _PermanentError("provider rejected request")
+                return _valid_batch(kwargs["model_ref"])
+
+        orchestrator = MultiLLMOrchestrator(db=db, pipeline=Pipeline())
+
+        async with db.session() as session:
+            research_session = ResearchSession(name="partial", prompt="test", status=ResearchStatus.IDLE)
+            session.add(research_session)
+            await session.flush()
+            session.add_all(
+                [
+                    ResearchResearcher(
+                        session_id=research_session.id,
+                        model_ref="test:failed",
+                        label="failed",
+                        enabled=True,
+                    ),
+                    ResearchResearcher(
+                        session_id=research_session.id,
+                        model_ref="test:success",
+                        label="success",
+                        enabled=True,
+                    ),
+                ]
+            )
+            await session.flush()
+            session_id = research_session.id
+
+        result = await orchestrator.run_generation_round(session_id, total_target_candidates=2)
+        assert len(result) == 1
+        assert result.summary["partialSuccess"] is True
+        assert result.summary["failedResearchers"] == 1
+        assert all(observed_running)
+
+        async with db.session() as session:
+            attempts = list(
+                (
+                    await session.scalars(
+                        select(GenerationAttempt).where(GenerationAttempt.session_id == session_id)
+                    )
+                ).all()
+            )
+            candidates = list(
+                (
+                    await session.scalars(
+                        select(ResearchCandidate).where(ResearchCandidate.session_id == session_id)
+                    )
+                ).all()
+            )
+            assert len(attempts) == 2
+            assert {attempt.status for attempt in attempts} == {
+                GenerationAttemptStatus.FAILED,
+                GenerationAttemptStatus.SUCCEEDED,
+            }
+            assert len(candidates) == 1
+            assert candidates[0].generation_attempt_id == next(
+                attempt.id for attempt in attempts if attempt.status == GenerationAttemptStatus.SUCCEEDED
+            )
+        await db.dispose()
+
+    asyncio.run(run())
+
+
+def test_p2_03_retry_exhaustion_and_cancellation_are_terminal():
+    async def run():
+        class AlwaysTransient:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate_batch(self, **kwargs):
+                self.calls += 1
+                raise _TransientError("still unavailable")
+
+        transient = AlwaysTransient()
+        orchestrator = MultiLLMOrchestrator.__new__(MultiLLMOrchestrator)
+        orchestrator.pipeline = transient
+        exhausted = await _dispatch(orchestrator)
+        assert transient.calls == 3
+        assert exhausted.status == GenerationAttemptStatus.FAILED
+        assert exhausted.retry_count == 2
+
+        class Cancelled:
+            async def generate_batch(self, **kwargs):
+                raise asyncio.CancelledError()
+
+        cancelled_orchestrator = MultiLLMOrchestrator.__new__(MultiLLMOrchestrator)
+        cancelled_orchestrator.pipeline = Cancelled()
+        cancelled = await _dispatch(cancelled_orchestrator, attempt_id=10)
+        assert cancelled.status == GenerationAttemptStatus.CANCELLED
+        assert cancelled.validation_outcome == "CANCELLED"
+
+    asyncio.run(run())
+
+
+def test_p2_03_unexpected_gather_exception_is_persisted(tmp_path: Path):
+    async def run():
+        db = Database(tmp_path / "gather.db")
+        await db.create_all()
+        try:
+            async with db.session() as session:
+                research_session = ResearchSession(name="gather", prompt="test")
+                session.add(research_session)
+                await session.flush()
+                session.add(
+                    ResearchResearcher(
+                        session_id=research_session.id,
+                        model_ref="test:model",
+                        label="test",
+                        enabled=True,
+                    )
+                )
+                await session.flush()
+                session_id = research_session.id
+
+            orchestrator = MultiLLMOrchestrator(db=db, pipeline=SimpleNamespace())
+
+            async def unexpected(**kwargs):
+                raise RuntimeError("unexpected orchestration failure")
+
+            orchestrator._dispatch_researcher = unexpected
+            result = await orchestrator.run_generation_round(session_id, total_target_candidates=1)
+            assert result == []
+            assert result.summary["failedResearchers"] == 1
+            assert result.summary["failureDetails"][0]["validationOutcome"] == "ORCHESTRATION_EXCEPTION"
+            async with db.session() as session:
+                attempt = await session.scalar(
+                    select(GenerationAttempt).where(GenerationAttempt.session_id == session_id)
+                )
+                assert attempt is not None
+                assert attempt.status == GenerationAttemptStatus.FAILED
+                assert attempt.error_class == "RuntimeError"
+        finally:
+            await db.dispose()
 
     asyncio.run(run())
