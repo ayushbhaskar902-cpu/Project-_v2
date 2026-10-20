@@ -200,7 +200,7 @@
 **Fix:** Move business operations into application services (`EvaluationService`, `RobustnessService`, `ExperimentOrchestrator`, etc.) and keep route handlers thin. Make this incremental, not a big-bang rewrite, and only after behavioral tests exist.  
 **Acceptance tests:** Service-level tests run without HTTP routing; route tests verify schemas/status codes; behavior remains unchanged except intentional fixes.
 
-**Audit:** PENDING APPROVAL — `docs/remediation/reports/p2_02_audit_report.md`.
+**Verification:** COMPLETE ✅ — `docs/remediation/reports/p2_02_final_verification_report.md`.
 
 ### P2-03 — Researcher failures may be converted into missing output
 
@@ -208,6 +208,8 @@
 **Problem:** Concurrent dispatch uses `return_exceptions=True`; exception paths are logged but need durable per-attempt accounting so a failed model does not simply disappear.  
 **Fix:** Persist a `ResearcherAttempt` record for every call with status, provider, model, error class, retries, latency, token/cost details when available, and output validation. Make partial success visible. Retry only transient, idempotent failures with bounded backoff.  
 **Acceptance tests:** Provider exception creates a failed attempt record and visible UI state; sibling researchers still finish; retries do not duplicate candidate rows.
+
+**Audit:** PENDING APPROVAL — `docs/remediation/reports/p2_03_audit_report.md`.
 
 ### P2-04 — BRAIN result backfill failure is not a terminally modeled state
 

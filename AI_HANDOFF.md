@@ -3,7 +3,7 @@
 **Repository:** `https://github.com/ayushbhaskar902-cpu/Project-_v2.git`  
 **Target Branch:** `main`  
 **Current Date:** October 20, 2026  
-**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, and P2-01 are **VERIFIED COMPLETE**. The full backend suite currently passes **334 tests** with **36 async teardown warnings**. **P2-02 is AUDITED — PENDING APPROVAL**; do not implement it without approval.
+**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, P2-01, and P2-02 are **VERIFIED COMPLETE**. The full backend suite now passes **339 tests** with **32 existing async SQLite/SQLAlchemy teardown warnings**. **P2-03 is AUDITED — PENDING APPROVAL**; do not implement it without approval.
 
 ---
 
@@ -108,12 +108,15 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 
 ---
 
-## 4. Next Implementation Step: P2-02
+## 4. Next Implementation Step: P2-03
 
-P2-01 implementation and verification are complete. Its audit and final report are documented in [`docs/remediation/reports/p2_01_audit_report.md`](docs/remediation/reports/p2_01_audit_report.md) and [`docs/remediation/reports/p2_01_final_verification_report.md`](docs/remediation/reports/p2_01_final_verification_report.md). The next audit is [`docs/remediation/reports/p2_02_audit_report.md`](docs/remediation/reports/p2_02_audit_report.md), pending user approval before implementation.
+P2-01 and P2-02 implementation work is documented in [`docs/remediation/reports/p2_01_final_verification_report.md`](docs/remediation/reports/p2_01_final_verification_report.md) and [`docs/remediation/reports/p2_02_final_verification_report.md`](docs/remediation/reports/p2_02_final_verification_report.md). The next artifact is [`docs/remediation/reports/p2_03_audit_report.md`](docs/remediation/reports/p2_03_audit_report.md), pending user approval before implementation.
 
 ### P2-01 Verification Summary
-P2-01 now persists one idempotent evaluation job per candidate and simulation attempt, reconciles actual `SimulationRecord` and verified-vault evidence, and exposes read-only progress for refresh-safe frontend polling. The frontend no longer repeats `POST /evaluate` while polling. Targeted P2-01 tests: 5 passed. Full backend suite: 334 passed, 36 async teardown warnings, exit code 0.
+P2-01 now persists one idempotent evaluation job per candidate and simulation attempt, reconciles actual `SimulationRecord` and verified-vault evidence, and exposes read-only progress for refresh-safe frontend polling. The frontend no longer repeats `POST /evaluate` while polling. Its original verification run had 5 targeted tests passed and 334 full-suite tests passed with 36 async teardown warnings; the current post-P2-02 full suite is 339 passed with 32 warnings.
+
+### P2-02 Verification Summary
+P2-02 incrementally extracts session lifecycle and multi-step research workflows into `backend/src/alpha_harness/application/research.py`, while preserving route paths, response contracts, exception mappings, transaction boundaries, realtime topics, and existing P0/P1 safeguards. Focused service/regression tests: 35 passed, 2 warnings. Full backend suite: 339 passed, 32 existing async teardown warnings, exit code 0.
 
 ### P1-16 Verification Summary
 P1-16 now distinguishes internal quality thresholds, statistical/lifecycle acceptance, verified BRAIN eligibility, and actual submission evidence. The compatibility field `scorecard.is_submission_grade` is explicitly an internal-quality alias only.

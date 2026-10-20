@@ -2,6 +2,12 @@
 
 This log persistently tracks non-blocking enhancements, advanced statistical estimators, and deferred technical debt across the remediation program.
 
+## 8. Incremental API Decomposition Remainder
+
+- **Issue ID**: `DEFERRED-P2-02-01`
+- **Origin**: P2-02 service extraction.
+- **Details**: `research.py` still contains read-only query and response-shaping handlers by design. A broader decomposition, browser-level frontend harness, and async teardown cleanup remain separate work; no deferred issue was removed or closed by P2-02.
+
 ---
 
 ## 1. Robust Sharpe Uncertainty Estimation (Deferred from P1-10)

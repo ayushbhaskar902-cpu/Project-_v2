@@ -2,8 +2,8 @@
 
 **Canonical issue title:** API module contains too much business/research logic
 **Canonical problem statement:** HTTP routing, BRAIN synchronization, synthetic fallback, evaluation and robustness logic are coupled in a large module.
-**Status:** AUDITED — PENDING APPROVAL
-**Implementation:** Not started
+**Status:** VERIFIED COMPLETE
+**Implementation:** Incremental application-service extraction completed; P2-03 remains audit-only.
 
 ## Scope and confirmed evidence
 
