@@ -11,6 +11,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -38,6 +39,7 @@ jobs:
           PY
 
       - name: Install locked backend dependencies
+        id: backend_install
         run: uv sync --frozen --directory backend
 
       - name: Target P2-04 backfill regressions
@@ -45,73 +47,120 @@ jobs:
         continue-on-error: true
         shell: bash
         working-directory: backend
-        run: >-
-          uv run --frozen --with pytest==8.4.2 python -m pytest
-          tests/test_p2_01_evaluation_jobs.py::test_p2_04_backfill_error_classification_and_sanitization
-          tests/test_p2_01_evaluation_jobs.py::test_backfill_failures_retry_then_become_terminal
-          tests/test_p2_01_evaluation_jobs.py::test_job_is_evaluable_only_after_verified_result_is_persisted
-          tests/test_p2_01_evaluation_jobs.py::test_p2_04_manual_requeue_preserves_persisted_failure_history
-          tests/test_p2_01_evaluation_jobs.py::test_p2_04_expired_worker_cannot_overwrite_newer_worker_outcome
-          tests/test_p2_01_evaluation_jobs.py::test_p2_04_database_commit_failure_cannot_mark_job_evaluable
-          tests/test_p2_04_backfill_failure_association.py
+        run: |
+          set +e
+          set -o pipefail
+          timeout 15m uv run --frozen --with pytest==8.4.2 python -m pytest \
+            tests/test_p2_01_evaluation_jobs.py::test_p2_04_backfill_error_classification_and_sanitization \
+            tests/test_p2_01_evaluation_jobs.py::test_backfill_failures_retry_then_become_terminal \
+            tests/test_p2_01_evaluation_jobs.py::test_job_is_evaluable_only_after_verified_result_is_persisted \
+            tests/test_p2_01_evaluation_jobs.py::test_p2_04_manual_requeue_preserves_persisted_failure_history \
+            tests/test_p2_01_evaluation_jobs.py::test_p2_04_expired_worker_cannot_overwrite_newer_worker_outcome \
+            tests/test_p2_01_evaluation_jobs.py::test_p2_04_database_commit_failure_cannot_mark_job_evaluable \
+            tests/test_p2_04_backfill_failure_association.py \
           -vv -ra --junitxml=../p2-04-targeted.xml 2>&1 | tee ../p2-04-targeted.log
+          result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          echo "::notice title=P2-04 test exit code::$result"
+          exit "$result"
 
       - name: Target P2-05 reproducibility regressions
         id: p205
         continue-on-error: true
         shell: bash
         working-directory: backend
-        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_05_reproducibility.py -vv -ra --junitxml=../p2-05-targeted.xml 2>&1 | tee ../p2-05-targeted.log
+        run: |
+          set +e
+          set -o pipefail
+          timeout 15m uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_05_reproducibility.py -vv -ra --junitxml=../p2-05-targeted.xml 2>&1 | tee ../p2-05-targeted.log
+          result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          echo "::notice title=P2-05 test exit code::$result"
+          exit "$result"
 
       - name: P2-01 evaluation-job suite
         id: p201
         continue-on-error: true
         shell: bash
         working-directory: backend
-        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_01_evaluation_jobs.py -q -ra --junitxml=../p2-01.xml 2>&1 | tee ../p2-01.log
+        run: |
+          set +e
+          set -o pipefail
+          timeout 15m uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_01_evaluation_jobs.py -q -ra --junitxml=../p2-01.xml 2>&1 | tee ../p2-01.log
+          result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          echo "::notice title=P2-01 test exit code::$result"
+          exit "$result"
 
       - name: P0 regressions
         id: p0
         continue-on-error: true
         shell: bash
         working-directory: backend
-        run: >-
-          uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p0_*.py
-          -q -ra --junitxml=../p0.xml 2>&1 | tee ../p0.log
+        run: |
+          set +e
+          set -o pipefail
+          timeout 20m uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p0_*.py -q -ra --junitxml=../p0.xml 2>&1 | tee ../p0.log
+          result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          echo "::notice title=P0 test exit code::$result"
+          exit "$result"
 
       - name: P1 regressions
         id: p1
         continue-on-error: true
         shell: bash
         working-directory: backend
-        run: >-
-          uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p1_*.py
-          -q -ra --junitxml=../p1.xml 2>&1 | tee ../p1.log
+        run: |
+          set +e
+          set -o pipefail
+          timeout 20m uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p1_*.py -q -ra --junitxml=../p1.xml 2>&1 | tee ../p1.log
+          result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          echo "::notice title=P1 test exit code::$result"
+          exit "$result"
 
       - name: P2-02 regression
         id: p202
         continue-on-error: true
         shell: bash
         working-directory: backend
-        run: >-
-          uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_02_research_services.py
-          -q -ra --junitxml=../p2-02.xml 2>&1 | tee ../p2-02.log
+        run: |
+          set +e
+          set -o pipefail
+          timeout 15m uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_02_research_services.py -q -ra --junitxml=../p2-02.xml 2>&1 | tee ../p2-02.log
+          result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          echo "::notice title=P2-02 test exit code::$result"
+          exit "$result"
 
       - name: P2-03 regression
         id: p203
         continue-on-error: true
         shell: bash
         working-directory: backend
-        run: >-
-          uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_03_researcher_attempts.py
-          -q -ra --junitxml=../p2-03.xml 2>&1 | tee ../p2-03.log
+        run: |
+          set +e
+          set -o pipefail
+          timeout 15m uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_03_researcher_attempts.py -q -ra --junitxml=../p2-03.xml 2>&1 | tee ../p2-03.log
+          result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          echo "::notice title=P2-03 test exit code::$result"
+          exit "$result"
 
       - name: Complete backend suite
         id: backend
         continue-on-error: true
         shell: bash
         working-directory: backend
-        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests --tb=short -q -ra --junitxml=../backend-full.xml 2>&1 | tee ../backend-full.log
+        run: |
+          set +e
+          set -o pipefail
+          timeout 30m uv run --frozen --with pytest==8.4.2 python -m pytest tests --tb=short -q -ra --junitxml=../backend-full.xml 2>&1 | tee ../backend-full.log
+          result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Backend suite exit code::$result"
+          exit "$result"
 
       - uses: pnpm/action-setup@v6
         with:
@@ -122,21 +171,32 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
       - name: Install locked frontend dependencies
+        id: frontend_install
         working-directory: frontend
         run: pnpm install --frozen-lockfile
       - name: Frontend component tests
         id: frontend_tests
         continue-on-error: true
         working-directory: frontend
-        run: pnpm test
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          pnpm test 2>&1 | tee ../frontend-tests.log
+          result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Frontend tests exit code::$result"
+          exit "$result"
       - name: Frontend checks
         id: frontend_check
         continue-on-error: true
         working-directory: frontend
         run: |
           set +e
-          pnpm check
+          set -o pipefail
+          pnpm check 2>&1 | tee ../frontend-check.log
           result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
           echo "::notice title=Frontend command exit code::pnpm check exited $result"
           exit "$result"
       - name: Frontend build
@@ -145,22 +205,18 @@ jobs:
         working-directory: frontend
         run: |
           set +e
-          pnpm build
+          set -o pipefail
+          pnpm build 2>&1 | tee ../frontend-build.log
           result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
           echo "::notice title=Frontend command exit code::pnpm build exited $result"
           exit "$result"
-
-      - name: Publish test result files
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: p2-04-p2-05-verification-results
-          path: "*.xml"
-          if-no-files-found: ignore
 
       - name: Preserve aggregate verification status
         if: always()
         env:
+          BACKEND_INSTALL: ${{ steps.backend_install.outcome }}
+          FRONTEND_INSTALL: ${{ steps.frontend_install.outcome }}
           P204: ${{ steps.p204.outcome }}
           P205: ${{ steps.p205.outcome }}
           P201: ${{ steps.p201.outcome }}
@@ -172,6 +228,17 @@ jobs:
           FRONTEND_TESTS: ${{ steps.frontend_tests.outcome }}
           FRONTEND_CHECK: ${{ steps.frontend_check.outcome }}
           FRONTEND_BUILD: ${{ steps.frontend_build.outcome }}
+          P204_EXIT: ${{ steps.p204.outputs.exit_code }}
+          P205_EXIT: ${{ steps.p205.outputs.exit_code }}
+          P201_EXIT: ${{ steps.p201.outputs.exit_code }}
+          P0_EXIT: ${{ steps.p0.outputs.exit_code }}
+          P1_EXIT: ${{ steps.p1.outputs.exit_code }}
+          P202_EXIT: ${{ steps.p202.outputs.exit_code }}
+          P203_EXIT: ${{ steps.p203.outputs.exit_code }}
+          BACKEND_EXIT: ${{ steps.backend.outputs.exit_code }}
+          FRONTEND_TESTS_EXIT: ${{ steps.frontend_tests.outputs.exit_code }}
+          FRONTEND_CHECK_EXIT: ${{ steps.frontend_check.outputs.exit_code }}
+          FRONTEND_BUILD_EXIT: ${{ steps.frontend_build.outputs.exit_code }}
         run: |
           python - <<'PY'
           import os
@@ -210,10 +277,41 @@ jobs:
                       detail = " | ".join(detail_lines[-4:]) or issue.get("message", "")
                       detail = detail.replace("\n", " ")[:500]
                       print(f"::error title=Failing test::{case.get('classname')}.{case.get('name')}: {detail}")
-          pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(
-              "## Pytest results\n\n" + "\n".join(f"- {line}" for line in lines) + "\n",
-              encoding="utf-8",
-          )
+          summary = [
+              "## Verification run",
+              "",
+              f"- Commit: `{os.environ.get('GITHUB_SHA', 'unknown')}`",
+              f"- Python: `{__import__('sys').version.split()[0]}`",
+              f"- Backend dependency install: `{os.environ.get('BACKEND_INSTALL')}`",
+              f"- Frontend dependency install: `{os.environ.get('FRONTEND_INSTALL')}`",
+              "",
+              "## Pytest results",
+              "",
+              *(f"- {line}" for line in lines),
+              "",
+              "## Step outcomes",
+              "",
+          ]
+          details = {
+              "P2-04 targeted": ("P204", "P204_EXIT", "selected P2-04 pytest cases"),
+              "P2-05 targeted": ("P205", "P205_EXIT", "pytest tests/test_p2_05_reproducibility.py"),
+              "P2-01": ("P201", "P201_EXIT", "pytest tests/test_p2_01_evaluation_jobs.py"),
+              "P0": ("P0", "P0_EXIT", "pytest tests/test_p0_*.py"),
+              "P1": ("P1", "P1_EXIT", "pytest tests/test_p1_*.py"),
+              "P2-02": ("P202", "P202_EXIT", "pytest tests/test_p2_02_research_services.py"),
+              "P2-03": ("P203", "P203_EXIT", "pytest tests/test_p2_03_researcher_attempts.py"),
+              "Backend full": ("BACKEND", "BACKEND_EXIT", "pytest tests --tb=short -q -ra"),
+              "Frontend tests": ("FRONTEND_TESTS", "FRONTEND_TESTS_EXIT", "pnpm test"),
+              "Frontend check": ("FRONTEND_CHECK", "FRONTEND_CHECK_EXIT", "pnpm check"),
+              "Frontend build": ("FRONTEND_BUILD", "FRONTEND_BUILD_EXIT", "pnpm build"),
+          }
+          for label, (outcome_key, exit_key, command) in details.items():
+              outcome = os.environ.get(outcome_key, "unknown")
+              exit_code = os.environ.get(exit_key) or "not run"
+              summary.append(f"- {label}: `{outcome}`, exit `{exit_code}` — `{command}`")
+          summary_text = "\n".join(summary) + "\n"
+          pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(summary_text, encoding="utf-8")
+          pathlib.Path("verification-summary.md").write_text(summary_text, encoding="utf-8")
           PY
           printf 'Recorded outcomes: P2-04=%s P2-05=%s P2-01=%s P0=%s P1=%s P2-02=%s P2-03=%s backend=%s frontend-tests=%s frontend-check=%s frontend-build=%s\n' \
             "$P204" "$P205" "$P201" "$P0" "$P1" "$P202" "$P203" "$BACKEND" "$FRONTEND_TESTS" "$FRONTEND_CHECK" "$FRONTEND_BUILD"
@@ -223,6 +321,17 @@ jobs:
             && test "$P1" = success && test "$P202" = success && test "$P203" = success \
             && test "$BACKEND" = success && test "$FRONTEND_TESTS" = success \
             && test "$FRONTEND_CHECK" = success && test "$FRONTEND_BUILD" = success
+
+      - name: Publish test result files
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: p2-04-p2-05-verification-results
+          path: |
+            *.xml
+            *.log
+            verification-summary.md
+          if-no-files-found: ignore
 
   frontend-baseline:
     runs-on: ubuntu-latest

@@ -47,18 +47,29 @@ def test_seed_derivation_rejects_missing_identity_and_negative_seed() -> None:
         derive_seed("run-a", {}, explicit_seed=-1)
 
 
-def test_seed_is_stable_across_process_hash_seeds() -> None:
+def test_generated_preview_is_stable_across_process_hash_seeds() -> None:
     code = (
+        "import json; from alpha_harness.brain.schemas import SimulationRequest, SimulationSettings; "
+        "from alpha_harness.labs.launch import preview_samples; "
         "from alpha_harness.labs.seeding import derive_seed; "
-        "print(derive_seed('experiment-unique-1', {'b': 2, 'a': ['x', 'y']}, explicit_seed=9))"
+        "identity=__import__('sys').argv[1]; config={'b': 2, 'a': ['x', 'y']}; "
+        "seed=derive_seed(identity, config, explicit_seed=9); "
+        "draw=lambda rng: SimulationRequest(regular=f'rank(close) + {rng.randrange(1_000_000)}', "
+        "settings=SimulationSettings(region='USA', delay=1, universe='TOP3000')); "
+        "result=preview_samples(draw, tries=5, seed=seed); "
+        "print(json.dumps([item.model_dump(mode='json') for item in result], sort_keys=True))"
     )
     backend = Path(__file__).resolve().parents[1]
     outputs = []
-    for hash_seed in ("1", "987654"):
+    for hash_seed, identity in (
+        ("1", "experiment-unique-1"),
+        ("987654", "experiment-unique-1"),
+        ("1", "experiment-unique-2"),
+    ):
         env = os.environ.copy()
         env["PYTHONHASHSEED"] = hash_seed
         proc = subprocess.run(
-            [sys.executable, "-c", code],
+            [sys.executable, "-c", code, identity],
             cwd=backend,
             env=env,
             capture_output=True,
@@ -68,6 +79,8 @@ def test_seed_is_stable_across_process_hash_seeds() -> None:
         )
         outputs.append(proc.stdout.strip())
     assert outputs[0] == outputs[1]
+    assert outputs[0] != "[]"
+    assert outputs[0] != outputs[2]
 
 
 def test_seed_metadata_records_unknown_legacy_as_unknown() -> None:
@@ -198,15 +211,30 @@ def test_add_study_persists_effective_seed_and_configuration(tmp_path: Path) -> 
             async with db.session() as session:
                 row = await session.get(Study, added.id)
                 assert row is not None
-                metadata = row.sampler_params["_reproducibility"]
+                original_task = row.task
+                original_seed = row.seed
+                original_metadata = row.sampler_params["_reproducibility"]
                 configuration = {"sampler": SEARCH_SAMPLER, "params": params.dump()}
-                assert row.seed == derive_seed(
-                    row.task, configuration, explicit_seed=73
+                assert original_seed == derive_seed(
+                    original_task, configuration, explicit_seed=73
                 )
-                assert metadata["effective_seed"] == row.seed
-                assert metadata["derivation_version"] == SEED_DERIVATION_VERSION
-                assert metadata["canonical_configuration"]
+                assert original_metadata["effective_seed"] == original_seed
+                assert original_metadata["derivation_version"] == SEED_DERIVATION_VERSION
+                assert original_metadata["canonical_configuration"]
         finally:
             await db.dispose()
+
+        # A new engine/session against the same SQLite file models an application restart.
+        restarted = Database(tmp_path / "p2-05-seed.sqlite")
+        await restarted.create_all()
+        try:
+            async with restarted.session() as session:
+                row = await session.get(Study, added.id)
+                assert row is not None
+                assert row.task == original_task
+                assert row.seed == original_seed
+                assert row.sampler_params["_reproducibility"] == original_metadata
+        finally:
+            await restarted.dispose()
 
     asyncio.run(_run())
