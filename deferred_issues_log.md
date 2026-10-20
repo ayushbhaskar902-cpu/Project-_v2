@@ -113,5 +113,5 @@ P2-03 is verified complete. All existing deferred items, including `DEFERRED-TES
 
 ## P2-04 Verification Note
 
-P2-04 remains unverified. The independent GitHub-hosted Python 3.14 run passed 352 backend tests with 31 async teardown warnings, including background failure association, restart scheduling, manual requeue, stale-worker and database-commit-failure coverage. Frontend check/build failures reproduce at the base commit and remain an acceptance gap. Direct local Python probes continue to show the host runtime stalls in `socket.socketpair()` before project code. No deferred technical-debt entry was removed or reclassified; `DEFERRED-TEST-01` remains intact.
+P2-04 is verified complete on GitHub-hosted `ubuntu-latest` run [39440343617](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39440343617), source commit `7fd19e3d6343ed74a48d302b3bb918422b718c79`: all 353 backend tests, the focused 9-test P2-04 suite, the 9 frontend status tests, `pnpm check`, and `pnpm build` passed. The 39 full-suite async teardown warnings remain deferred under `DEFERRED-TEST-01`; no deferred item was removed or reclassified. The local Windows Python/asyncio startup issue remains environment-specific; independent-runner verification succeeded.
 

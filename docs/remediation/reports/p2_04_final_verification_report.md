@@ -1,7 +1,7 @@
 # P2-04 Final Verification Report — BRAIN Result Backfill Failure Lifecycle
 
 **Canonical issue:** BRAIN result backfill failure is not a terminally modeled state
-**Status:** IMPLEMENTED — UNVERIFIED
+**Status:** VERIFIED COMPLETE (independent runner)
 **Implementation date:** 2026-10-20
 
 ## Implemented safeguards
@@ -17,7 +17,7 @@
 
 ## Verification status
 
-The local Windows runtime remains blocked: UV cannot write its cache, and direct Python 3.14 probes stall in `socket.socketpair()` before application code. Independent verification now runs on a clean GitHub-hosted Ubuntu runner with Python 3.14. The environment diagnostic and frozen dependency installation passed. P2-04 remains **UNVERIFIED** because the full backend suite passes but frontend `check` and `build` fail on diagnostics also present at the base commit; final targeted database-failure regression additions are pending a new run.
+The local Windows Python 3.14.7 runtime remains blocked before project code: asyncio and `socket.socketpair()` stall, and UV cannot write its sandbox cache. Independent verification on GitHub-hosted `ubuntu-latest` passed the Python/asyncio/socket diagnostic and frozen installs. P2-04 is **VERIFIED COMPLETE** on source commit `7fd19e3d6343ed74a48d302b3bb918422b718c79`: backend and frontend tests passed, and frontend check/build both exited 0. The clean-base comparison confirms both frontend commands failed at baseline due unused symbols in `research/index.tsx`, which were safely removed. Existing async teardown warnings remain deferred as `DEFERRED-TEST-01`.
 
 ### Isolated runtime evidence
 
@@ -37,20 +37,23 @@ The direct interpreter was `C:\Users\LENOVO\AppData\Local\Programs\Python\Python
 
 ### Independent GitHub Actions run
 
-Run [39437486303](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39437486303) at checkpoint `a25b7a15080e2324f54a4d808a7d01ccb9cba478` completed on `ubuntu-latest` in 1m22s (14:14:58–14:16:20 UTC). Python 3.14 diagnostic, `uv sync --frozen`, and frontend frozen installation passed. Pytest `8.4.2` was added ephemerally with `uv run --with`; it was not added to project dependencies or the lockfile. This checkpoint changes verification documentation and adds explicit frontend exit-code reporting; the application source and tests are the same as the previous run.
+Run [39440343617](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39440343617) completed on `ubuntu-latest` in 2m07s (14:33:41–14:35:48 UTC), at source commit `7fd19e3d6343ed74a48d302b3bb918422b718c79`. Python 3.14 runtime diagnostics, frozen backend/frontend dependency installs, all test suites, component tests, frontend check, and frontend build passed. Pytest `8.4.2` was provided ephemerally through `uv run --with`; it was not added to project dependencies or the lockfile.
 
-| Suite | Result | Pytest time |
+| Suite/check | Result | Time |
 |---|---:|---:|
-| Targeted P2-04 regressions | **8 passed; 0 failed/errors/skipped** | See run [39437486303](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39437486303) annotations |
-| P2-01 evaluation-job file | **9 passed; 0 failed/errors/skipped** | 0.80s |
-| P0 regression files | **60 passed; 0 failed/errors/skipped; 13 warnings** | 5.75s |
-| P1 regression files | **269 passed; 0 failed/errors/skipped; 23 warnings** | 10.28s |
-| P2-02 regression | **5 passed; 0 failed/errors/skipped** | 0.49s |
-| P2-03 regression | **7 passed; 0 failed/errors/skipped** | 1.76s |
-| Full backend suite | **352 passed; 0 failed/errors/skipped; 36 warnings** | 14.90s |
+| Targeted P2-04 backend regressions | **9 passed; 0 failed/errors/skipped** | 3.47s |
+| P2-01 evaluation-job suite | **9 passed; 0 failed/errors/skipped** | 1.65s |
+| P0 regression files | **60 passed; 0 failed/errors/skipped; 12 warnings** | 11.17s |
+| P1 regression files | **269 passed; 0 failed/errors/skipped; 16 warnings** | 21.66s |
+| P2-02 regression | **5 passed; 0 failed/errors/skipped** | 0.95s |
+| P2-03 regression | **7 passed; 0 failed/errors/skipped** | 2.49s |
+| Full backend suite | **353 passed; 0 failed/errors/skipped; 39 warnings** | 30.03s |
+| Frontend component tests | **9 passed; 0 failed/skipped; exit 0** | 0.33s local run; runner step passed |
+| `pnpm check` | **exit 0** | Runner step passed |
+| `pnpm build` | **exit 0** | Runner step passed |
 
-The backend warnings include an `Event loop is closed` teardown diagnostic, consistent with the preserved `DEFERRED-TEST-01` async worker-thread cleanup issue. No test was skipped. The first independent run exposed an undeclared `httpx` import in `learning/loop.py`, although the frozen project supplies `httpx2`; the import and corresponding timeout test now use the locked `httpx2` package. The passing backend figures above include that compatibility fix.
+The full-suite warnings include `Event loop is closed` async teardown diagnostics, preserved under `DEFERRED-TEST-01`. No test was skipped. The earlier run at `40a3c2c` identified a UI defect: the “Refresh Status” control called the simulation/evaluation POST flow. It now calls the read-only evaluation-job GET endpoint. A second concurrency review found delayed `_fetch_each()` failures could be misattributed to a newer worker or unregister its callback; worker token and attempt fencing now prevent both, with a dedicated regression. The P2-04 display tests cover waiting, in-progress, retry time, incomplete artifacts, terminal failure, human review, verified-ready, and evaluated states, and assert polling/refresh uses GET.
 
-On run 39437486303, `pnpm check` returned **1** and `pnpm build` returned **1** on the working branch. The comparison job at base commit `2be883eea92d92e946c68352fca5cb40651a1a83` returned **1** for both commands as well, with the same existing unused imports, variables, and constants in `frontend/src/screens/research/index.tsx`. The working-tree diagnostics refer to those unchanged declarations; none point into the added P2-04 lifecycle rendering block. Thus these failures are confirmed baseline debt, while a successful frontend build is not established.
+The frontend baseline job at clean commit `2be883eea92d92e946c68352fca5cb40651a1a83` still returns exit 1 for both `pnpm check` and `pnpm build`, due to unused imports/state/constants in `frontend/src/screens/research/index.tsx`. The same checks on the WIP source now return 0 after removing those demonstrably unused declarations and the unreachable, nonfunctional New Campaign control/handler. Thus the previous failures were confirmed baseline issues and are resolved on the WIP branch without suppressing checks.
 
-The passing targeted tests cover durable `_fetch_each()` job association after database restart, retry classification/scheduling across service restarts, missing-artifact gating, explicit manual requeue history, expired-worker fencing, and a simulated commit failure that leaves the job blocked in `RESULT_BACKFILL`. P0/P1/P2-02/P2-03 and the full backend suite all passed. Run 39437486303's aggregate workflow exited **1**: `pnpm check` and `pnpm build` each exited **1**, both on the working branch and at the clean base commit. The lifecycle-rendering changes received no diagnostics. The current UI still lacks a component-level state-rendering test. P2-04 remains **UNVERIFIED** because required frontend checks did not pass, even though the failures are confirmed at baseline.
+The tested implementation now satisfies the P2-04 acceptance criteria: durable error association and retry history; transient/permanent classification and bounded schedules; missing/incomplete artifact gating; provenance-verified persisted artifacts before `EVALUABLE`; duplicate/concurrent processing and stale-worker fencing, including delayed background failures; restart and database-failure safety; auditable manual requeue; accurate UI status rendering; and preserved P0 provenance/holdout and P2-01 evaluation safeguards. The local Windows interpreter remains an environment-specific limitation; it does not affect the independent-runner result. P2-04 is **VERIFIED COMPLETE**. The dedicated branch is ready for review; no merge to `main` is included in this checkpoint.

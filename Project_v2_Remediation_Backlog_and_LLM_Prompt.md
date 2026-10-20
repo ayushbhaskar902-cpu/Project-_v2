@@ -218,7 +218,7 @@
 **Fix:** Track backfill status, attempts, last error, next retry and required artifact availability. Backoff on temporary errors; stop/review after a defined retry budget; never replace missing data with fabricated returns.  
 **Acceptance tests:** Backfill failure leaves candidate unevaluated; a later successful backfill resumes evaluation; terminal failure is visible and auditable.
 
-**Verification:** IMPLEMENTED — **UNVERIFIED**. Independent GitHub runner: full backend suite 350 passed with 31 async teardown warnings; frontend check/build failures reproduce at the base commit. Final focused database-failure and durable background-association regressions remain to be run. Evidence: `docs/remediation/reports/p2_04_final_verification_report.md`.
+**Verification:** **VERIFIED COMPLETE** on independent GitHub-hosted `ubuntu-latest` run 39440343617 at source commit `7fd19e3d6343ed74a48d302b3bb918422b718c79`: 353 backend tests passed, 9 focused P2-04 backend tests passed, 9 frontend status tests passed, and `pnpm check`/`pnpm build` both exited 0. The clean-base comparison confirms the removed unused-symbol diagnostics were pre-existing. Thirty-nine full-suite async teardown warnings remain tracked under `DEFERRED-TEST-01`. Evidence: `docs/remediation/reports/p2_04_final_verification_report.md`.
 
 ### P2-05 — Reproducibility is compromised by randomized synthetic seeds
 
