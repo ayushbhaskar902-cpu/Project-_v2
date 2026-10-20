@@ -171,7 +171,9 @@ jobs:
                   if issue is None:
                       issue = case.find("error")
                   if issue is not None:
-                      detail = (issue.get("message") or (issue.text or "")).replace("\n", " ")[:300]
+                      detail_lines = (issue.text or "").strip().splitlines()
+                      detail = " | ".join(detail_lines[-4:]) or issue.get("message", "")
+                      detail = detail.replace("\n", " ")[:500]
                       print(f"::error title=Failing test::{case.get('classname')}.{case.get('name')}: {detail}")
           pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(
               "## Pytest results\n\n" + "\n".join(f"- {line}" for line in lines) + "\n",
@@ -203,10 +205,18 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
       - name: Baseline frontend checks
+        id: baseline_check
         continue-on-error: true
         working-directory: frontend
         run: pnpm check
       - name: Baseline frontend build
+        id: baseline_build
         continue-on-error: true
         working-directory: frontend
         run: pnpm build
+      - name: Report baseline frontend outcomes
+        if: always()
+        env:
+          CHECK: ${{ steps.baseline_check.outcome }}
+          BUILD: ${{ steps.baseline_build.outcome }}
+        run: echo "::notice title=Baseline frontend outcomes::pnpm check=$CHECK, pnpm build=$BUILD at base commit 2be883eea92d92e946c68352fca5cb40651a1a83"
