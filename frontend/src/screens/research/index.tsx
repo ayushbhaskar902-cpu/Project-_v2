@@ -221,6 +221,27 @@ interface EvaluationJob {
   failedAt: string | null
 }
 
+interface GenerationRoundSummary {
+  attemptedResearchers: number
+  successfulResearchers: number
+  failedResearchers: number
+  cancelledResearchers: number
+  emptyOutputResearchers: number
+  outputValidationFailures: number
+  partialSuccess: boolean
+  generatedCandidates: number
+  failureDetails: Array<{
+    attemptId: number
+    researcherId: number
+    modelRef: string
+    status: string
+    retryCount: number
+    errorClass: string | null
+    errorMessage: string | null
+    validationOutcome: string | null
+  }>
+}
+
 interface PoolResult {
   poolSize: number
   combinedSharpe: number
@@ -288,6 +309,7 @@ export function ResearchStudioScreen() {
 
   // Durable evaluation status; polling is read-only and survives refreshes.
   const [evaluationJobs, setEvaluationJobs] = useState<EvaluationJob[]>([])
+  const [generationSummary, setGenerationSummary] = useState<GenerationRoundSummary | null>(null)
 
   const loadEvaluationJobs = useCallback(async (sid: number) => {
     try {
@@ -376,8 +398,15 @@ export function ResearchStudioScreen() {
       })
       if (res.ok) {
         const data = await res.json()
+        setGenerationSummary(data)
         const count = data.validCandidatesGenerated ?? 0
-        toast.success(`Dispatched round: ${count} candidates generated`)
+        if (data.partialSuccess) {
+          toast.error('Round completed with researcher failures', {
+            description: `${data.failedResearchers ?? 0} failed, ${count} valid candidates retained.`,
+          })
+        } else {
+          toast.success(`Dispatched round: ${count} candidates generated`)
+        }
         await loadSessionData(selectedSessionId)
         await loadSessions()
       } else {
@@ -672,6 +701,26 @@ export function ResearchStudioScreen() {
           >
               Refresh Status
           </Button>
+        </div>
+      )}
+
+      {generationSummary && generationSummary.attemptedResearchers > 0 && (
+        <div className="mb-4 rounded-lg border border-status-warning/40 bg-status-warning/10 px-4 py-3 text-caption text-ink">
+          <div className="font-semibold">
+            Research round: {generationSummary.successfulResearchers} succeeded, {generationSummary.failedResearchers} failed, {generationSummary.cancelledResearchers} cancelled.
+          </div>
+          <div className="mt-1 text-ink-subtle">
+            {generationSummary.generatedCandidates} candidates returned; {generationSummary.emptyOutputResearchers} researcher(s) returned no output. Failed attempts remain available in durable attempt records.
+          </div>
+          {generationSummary.failureDetails.length > 0 && (
+            <div className="mt-2 text-ink-subtle">
+              {generationSummary.failureDetails.map((failure) => (
+                <div key={failure.attemptId}>
+                  Attempt {failure.attemptId} ({failure.modelRef}): {failure.errorMessage || failure.validationOutcome || failure.status}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

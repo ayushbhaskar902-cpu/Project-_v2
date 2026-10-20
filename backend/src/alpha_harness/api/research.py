@@ -184,6 +184,19 @@ class GenerationAttemptOut(Out):
     system_prompt: str | None = None
     user_prompt: str | None = None
     response_schema: dict[str, Any] | None = None
+    status: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    retry_count: int | None = None
+    error_class: str | None = None
+    error_message: str | None = None
+    latency_seconds: float | None = None
+    candidate_count: int | None = None
+    output_count: int | None = None
+    token_usage: int | None = None
+    cost: float | None = None
+    validation_outcome: str | None = None
+    provider_request_id: str | None = None
     created_at: datetime | None = None
 
 
@@ -379,11 +392,13 @@ async def trigger_generation_round(
 ) -> dict[str, Any]:
     """Dispatches a parallel generation round across all enabled researchers."""
     valid_ids = await ResearchSessionService(state).generate(session_id, payload.total_candidates)
+    summary = getattr(valid_ids, "summary", {})
     return {
         "status": "success",
         "sessionId": session_id,
         "validCandidatesGenerated": len(valid_ids),
         "validCandidateIds": valid_ids,
+        **summary,
     }
 
 
@@ -607,6 +622,19 @@ async def get_generation_attempt(session_id: int, attempt_id: int, state: State)
             system_prompt=attempt.system_prompt,
             user_prompt=attempt.user_prompt,
             response_schema=attempt.response_schema,
+            status=attempt.status,
+            started_at=attempt.started_at,
+            completed_at=attempt.completed_at,
+            retry_count=attempt.retry_count,
+            error_class=attempt.error_class,
+            error_message=attempt.error_message,
+            latency_seconds=attempt.latency_seconds,
+            candidate_count=attempt.candidate_count,
+            output_count=attempt.output_count,
+            token_usage=attempt.token_usage,
+            cost=attempt.cost,
+            validation_outcome=attempt.validation_outcome,
+            provider_request_id=attempt.provider_request_id,
             created_at=attempt.created_at,
         )
 

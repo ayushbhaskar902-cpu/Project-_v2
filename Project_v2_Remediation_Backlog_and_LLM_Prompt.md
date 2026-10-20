@@ -209,7 +209,7 @@
 **Fix:** Persist a `ResearcherAttempt` record for every call with status, provider, model, error class, retries, latency, token/cost details when available, and output validation. Make partial success visible. Retry only transient, idempotent failures with bounded backoff.  
 **Acceptance tests:** Provider exception creates a failed attempt record and visible UI state; sibling researchers still finish; retries do not duplicate candidate rows.
 
-**Audit:** PENDING APPROVAL — `docs/remediation/reports/p2_03_audit_report.md`.
+**Verification:** COMPLETE ✅ — `docs/remediation/reports/p2_03_final_verification_report.md`.
 
 ### P2-04 — BRAIN result backfill failure is not a terminally modeled state
 

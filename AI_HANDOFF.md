@@ -3,7 +3,7 @@
 **Repository:** `https://github.com/ayushbhaskar902-cpu/Project-_v2.git`  
 **Target Branch:** `main`  
 **Current Date:** October 20, 2026  
-**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, P2-01, and P2-02 are **VERIFIED COMPLETE**. The full backend suite now passes **339 tests** with **32 existing async SQLite/SQLAlchemy teardown warnings**. **P2-03 is AUDITED — PENDING APPROVAL**; do not implement it without approval.
+**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, and P2-01 through P2-03 are **VERIFIED COMPLETE**. The latest full backend suite passes **343 tests** with **21 existing async SQLite/SQLAlchemy teardown warnings**. P2-04 remains deferred and must not be implemented without approval.
 
 ---
 
@@ -92,7 +92,7 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 | **P1-16** | “Submission grade” is an internal heuristic, not proof of final submitability | ✅ **VERIFIED COMPLETE** |
 | **P2-01** | Frontend client state synchronization & WebSocket feeds | 🔍 **AUDITED — PENDING APPROVAL** (Next Implementation) |
 | **P2-02** | Simulation timeout & cancellation handling | ⬜ Tracked |
-| **P2-03** | SQLite write contention & connection pool lifecycle | ⬜ Tracked |
+| **P2-03** | Researcher failures may be converted into missing output | ✅ **VERIFIED COMPLETE** |
 | **P2-04** | Rate-limit handling & exponential backoff queueing | ⬜ Tracked |
 | **P2-05** | Cache invalidation on dataset/field catalog changes | ⬜ Tracked |
 | **P2-06** | Datafield search semantic indexing & ranking | ⬜ Tracked |
@@ -108,9 +108,12 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 
 ---
 
-## 4. Next Implementation Step: P2-03
+## 4. Next Implementation Step: P2-04
 
-P2-01 and P2-02 implementation work is documented in [`docs/remediation/reports/p2_01_final_verification_report.md`](docs/remediation/reports/p2_01_final_verification_report.md) and [`docs/remediation/reports/p2_02_final_verification_report.md`](docs/remediation/reports/p2_02_final_verification_report.md). The next artifact is [`docs/remediation/reports/p2_03_audit_report.md`](docs/remediation/reports/p2_03_audit_report.md), pending user approval before implementation.
+P2-01 and P2-02 implementation work is documented in [`docs/remediation/reports/p2_01_final_verification_report.md`](docs/remediation/reports/p2_01_final_verification_report.md) and [`docs/remediation/reports/p2_02_final_verification_report.md`](docs/remediation/reports/p2_02_final_verification_report.md). P2-03 is verified in [`docs/remediation/reports/p2_03_final_verification_report.md`](docs/remediation/reports/p2_03_final_verification_report.md). The next artifact is the P2-04 audit report; do not implement P2-04 until the user approves it.
+
+### P2-03 Verification Summary
+P2-03 now creates a durable `RUNNING` `GenerationAttempt` before each researcher provider call, records terminal provider/validation/cancellation/orchestration outcomes, applies bounded transient retries, preserves successful siblings and candidate lineage, exposes additive partial-round status through the API/UI, and recovers stale attempts. Focused P2-03 tests: 4 passed. Relevant regression tests: 146 passed with 1 existing async warning. Full backend suite: 343 passed, 21 existing async teardown warnings, exit code 0.
 
 ### P2-01 Verification Summary
 P2-01 now persists one idempotent evaluation job per candidate and simulation attempt, reconciles actual `SimulationRecord` and verified-vault evidence, and exposes read-only progress for refresh-safe frontend polling. The frontend no longer repeats `POST /evaluate` while polling. Its original verification run had 5 targeted tests passed and 334 full-suite tests passed with 36 async teardown warnings; the current post-P2-02 full suite is 339 passed with 32 warnings.

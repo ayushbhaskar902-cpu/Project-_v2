@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import timedelta
+import re
+import time
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -19,6 +22,7 @@ from ..brain.schemas import SimulationRequest, SimulationSettings, SimulationTyp
 from ..db.models import (
     CandidateStatus,
     GenerationAttempt,
+    GenerationAttemptStatus,
     PromptStrategy,
     PromptVersion,
     ResearchCandidate,
@@ -74,6 +78,58 @@ log = structlog.get_logger(__name__)
 SLOT_CAP: int = 8
 ITEMS_PER_CORE: int = 10
 ROUND_CAPACITY: int = SLOT_CAP * ITEMS_PER_CORE  # 80 candidates per round
+MAX_RESEARCHER_RETRIES: int = 2
+
+
+@dataclass(slots=True)
+class ResearcherDispatchOutcome:
+    """Result of one logical researcher dispatch, including an explicit failure outcome."""
+
+    attempt_id: int
+    researcher_id: int
+    model_ref: str
+    strategy_id: int | None
+    prompt_version_id: int | None
+    resolution_tier: str | None
+    temperature: float
+    selection_context: DatasetSelectionContext | None
+    batch: GenerationBatch | None
+    status: str
+    retry_count: int
+    latency_seconds: float | None
+    error_class: str | None = None
+    error_message: str | None = None
+    validation_outcome: str | None = None
+
+
+class GenerationRoundResult(list[int]):
+    """Backward-compatible list of valid candidate IDs with additive round accounting."""
+
+    def __init__(self, candidate_ids: list[int], summary: dict[str, Any]) -> None:
+        super().__init__(candidate_ids)
+        self.summary = summary
+
+
+def _safe_error(exc: BaseException, limit: int = 500) -> str:
+    """Return a bounded provider error without leaking credentials or raw payloads."""
+    message = " ".join(str(exc).split())
+    message = re.sub(
+        r"(?i)(api[_ -]?key|authorization|bearer|token|secret)\s*[:=]\s*\S+",
+        r"\1=[redacted]",
+        message,
+    )
+    return message[:limit] or exc.__class__.__name__
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Retry only errors that explicitly advertise transient, safe retry semantics."""
+    declared = getattr(exc, "retryable", None)
+    if declared is not None:
+        return bool(declared)
+    status = getattr(exc, "status", None)
+    return status in {429, 500, 502, 503, 504} or isinstance(
+        exc, (TimeoutError, ConnectionError, asyncio.TimeoutError)
+    )
 
 
 @dataclass(slots=True)
@@ -319,7 +375,7 @@ class MultiLLMOrchestrator:
         total_target_candidates: int = ROUND_CAPACITY,
         auto_repair: bool = True,
         max_repairs: int = 2,
-    ) -> list[int]:
+    ) -> GenerationRoundResult:
         """Runs a concurrent generation round across all enabled researchers in the session.
 
         Distributes candidate quota evenly across researchers, taking remainders into account:
@@ -328,6 +384,7 @@ class MultiLLMOrchestrator:
         Persists all generated candidates to SQLite with complete lineage tracking.
         Returns the list of valid candidate IDs ready for simulation.
         """
+        await self.reconcile_generation_attempts()
         async with self.db.session() as session:
             # 1. Fetch session details
             s_stmt = select(ResearchSession).where(ResearchSession.id == session_id)
@@ -387,8 +444,8 @@ class MultiLLMOrchestrator:
                         )
                     strategy_map[cat_norm] = (strat, pv, tier)
 
-        # 5. Run parallel generation outside DB transaction to avoid locking
-        tasks = []
+        # 5. Build dispatch specifications outside the provider call and transaction.
+        dispatch_specs: list[dict[str, Any]] = []
         for idx, r in enumerate(researchers):
             cat_norm = normalize_category(r.strategy_focus)
             cat = (
@@ -490,44 +547,123 @@ class MultiLLMOrchestrator:
                     num_researchers=num_researchers,
                 )
 
-            tasks.append(
-                self._dispatch_researcher(
-                    researcher_id=r.id,
-                    model_ref=r.model_ref or "google:gemini-2.5-flash",
-                    category=cat,
-                    count=allotments[idx],
-                    region=alloc_region,
-                    universe=alloc_universe,
-                    delay=alloc_delay,
-                    generation=current_gen,
-                    temperature=r.temperature or 0.7,
-                    winning_examples=winning_ex,
-                    anti_patterns=anti_pats,
-                    learning_feedback=feedback_str,
-                    auto_repair=auto_repair,
-                    max_repairs=max_repairs,
-                    strategy_id=active_strat.id if active_strat else None,
-                    prompt_version_id=pv.id,
-                    template_text=pv.template_text,
-                    resolution_tier=res_tier,
-                    selection_context=sel_ctx,
-                )
+            dispatch_specs.append(
+                {
+                    "researcher_id": r.id,
+                    "model_ref": r.model_ref or "google:gemini-2.5-flash",
+                    "category": cat,
+                    "count": allotments[idx],
+                    "region": alloc_region,
+                    "universe": alloc_universe,
+                    "delay": alloc_delay,
+                    "generation": current_gen,
+                    "temperature": r.temperature or 0.7,
+                    "winning_examples": winning_ex,
+                    "anti_patterns": anti_pats,
+                    "learning_feedback": feedback_str,
+                    "auto_repair": auto_repair,
+                    "max_repairs": max_repairs,
+                    "strategy_id": active_strat.id if active_strat else None,
+                    "prompt_version_id": pv.id,
+                    "template_text": pv.template_text,
+                    "resolution_tier": res_tier,
+                    "selection_context": sel_ctx,
+                }
             )
 
+        # Create the durable logical attempts before any provider coroutine starts.
+        async with self.db.session() as session:
+            for spec in dispatch_specs:
+                started_at = utcnow()
+                attempt = GenerationAttempt(
+                    session_id=session_id,
+                    researcher_id=spec["researcher_id"],
+                    prompt_strategy_id=spec["strategy_id"],
+                    prompt_version_id=spec["prompt_version_id"],
+                    resolution_tier=spec["resolution_tier"],
+                    generation=current_gen,
+                    model_ref=spec["model_ref"],
+                    temperature=spec["temperature"],
+                    target_dataset_id=(
+                        spec["selection_context"].selected_dataset_id
+                        if isinstance(spec["selection_context"], DatasetSelectionContext)
+                        else None
+                    ),
+                    catalog_version=(
+                        spec["selection_context"].catalog_version
+                        if isinstance(spec["selection_context"], DatasetSelectionContext)
+                        else None
+                    ),
+                    dataset_selection_policy=(
+                        spec["selection_context"].allocation_policy
+                        if isinstance(spec["selection_context"], DatasetSelectionContext)
+                        else None
+                    ),
+                    dataset_selection_reason=(
+                        spec["selection_context"].selection_reason
+                        if isinstance(spec["selection_context"], DatasetSelectionContext)
+                        else None
+                    ),
+                    datafield_catalog_version=(
+                        spec["selection_context"].datafield_catalog_version
+                        if isinstance(spec["selection_context"], DatasetSelectionContext)
+                        else None
+                    ),
+                    allowed_fields=(
+                        list(spec["selection_context"].allowed_field_names)
+                        if isinstance(spec["selection_context"], DatasetSelectionContext)
+                        else None
+                    ),
+                    status=GenerationAttemptStatus.RUNNING,
+                    started_at=started_at,
+                    retry_count=0,
+                    candidate_count=0,
+                    output_count=0,
+                )
+                session.add(attempt)
+                await session.flush()
+                spec["attempt_id"] = attempt.id
+
+        # 6. Run parallel generation outside DB transaction to avoid locking.
+        tasks = [
+            self._dispatch_researcher(**spec)
+            for spec in dispatch_specs
+        ]
         dispatch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        results: list[tuple[int, int | None, int | None, str | None, GenerationBatch, float, Any]] = []
-        for item in dispatch_results:
-            if isinstance(item, tuple) and len(item) == 7:
-                results.append(item)
-            elif isinstance(item, tuple) and len(item) == 6:
-                results.append((item[0], item[1], item[2], item[3], item[4], item[5], None))
-            elif isinstance(item, tuple) and len(item) == 5:
-                results.append((item[0], item[1], None, item[2], item[3], item[4], None))
-            elif isinstance(item, tuple) and len(item) == 4:
-                results.append((item[0], item[1], None, item[2], item[3], 0.7, None))
-            elif isinstance(item, Exception):
-                log.error("orchestrator.unexpected_dispatch_exception", error=str(item))
+        outcomes: list[ResearcherDispatchOutcome] = []
+        for spec, item in zip(dispatch_specs, dispatch_results, strict=True):
+            if isinstance(item, ResearcherDispatchOutcome):
+                outcomes.append(item)
+            elif isinstance(item, BaseException):
+                error_message = _safe_error(item)
+                log.error(
+                    "orchestrator.unexpected_dispatch_exception",
+                    researcher_id=spec["researcher_id"],
+                    attempt_id=spec["attempt_id"],
+                    error=error_message,
+                )
+                outcomes.append(
+                    ResearcherDispatchOutcome(
+                        attempt_id=spec["attempt_id"],
+                        researcher_id=spec["researcher_id"],
+                        model_ref=spec["model_ref"],
+                        strategy_id=spec["strategy_id"],
+                        prompt_version_id=spec["prompt_version_id"],
+                        resolution_tier=spec["resolution_tier"],
+                        temperature=spec["temperature"],
+                        selection_context=spec["selection_context"],
+                        batch=None,
+                        status=GenerationAttemptStatus.CANCELLED
+                        if isinstance(item, asyncio.CancelledError)
+                        else GenerationAttemptStatus.FAILED,
+                        retry_count=0,
+                        latency_seconds=None,
+                        error_class=item.__class__.__name__,
+                        error_message=error_message,
+                        validation_outcome="ORCHESTRATION_EXCEPTION",
+                    )
+                )
 
         # 6. Persist candidates and update researcher stats in SQLite
         valid_candidate_ids: list[int] = []
@@ -547,7 +683,51 @@ class MultiLLMOrchestrator:
             candidate_items: list[CandidateItem] = []
             cand_rows_by_id: dict[int, ResearchCandidate] = {}
 
-            for r_id, strat_id, pv_id, res_tier, batch, temp, sel_ctx in results:
+            for outcome in outcomes:
+                r_id = outcome.researcher_id
+                strat_id = outcome.strategy_id
+                pv_id = outcome.prompt_version_id
+                res_tier = outcome.resolution_tier
+                temp = outcome.temperature
+                sel_ctx = outcome.selection_context
+                batch = outcome.batch
+                attempt = await session.get(GenerationAttempt, outcome.attempt_id)
+                if attempt is not None:
+                    attempt.status = outcome.status
+                    attempt.completed_at = utcnow()
+                    attempt.retry_count = outcome.retry_count
+                    attempt.latency_seconds = outcome.latency_seconds
+                    attempt.error_class = outcome.error_class
+                    attempt.error_message = outcome.error_message
+                    attempt.validation_outcome = outcome.validation_outcome
+                    if batch is not None:
+                        attempt.model_ref = batch.model_ref
+                        attempt.system_prompt = batch.system_prompt
+                        attempt.user_prompt = batch.user_prompt
+                        attempt.response_schema = batch.response_schema
+                        attempt.candidate_count = len(batch.candidates)
+                        attempt.output_count = len(batch.candidates)
+                        attempt.token_usage = batch.total_tokens if batch.total_tokens > 0 else None
+                        attempt.provider_request_id = getattr(batch, "provider_request_id", None)
+                        attempt.target_dataset_id = batch.target_dataset_id or attempt.target_dataset_id
+                        attempt.catalog_version = batch.catalog_version or attempt.catalog_version
+                        attempt.dataset_selection_policy = (
+                            batch.dataset_selection_policy or attempt.dataset_selection_policy
+                        )
+                        attempt.dataset_selection_reason = (
+                            batch.dataset_selection_reason or attempt.dataset_selection_reason
+                        )
+                        attempt.datafield_catalog_version = (
+                            batch.datafield_catalog_version or attempt.datafield_catalog_version
+                        )
+                        attempt.allowed_fields = batch.allowed_fields or attempt.allowed_fields
+                        attempt.operator_catalog_version = (
+                            getattr(batch, "operator_catalog_version", None)
+                            or attempt.operator_catalog_version
+                        )
+
+                if batch is None:
+                    continue
                 raw_t_ds = getattr(batch, "target_dataset_id", None) or (
                     sel_ctx.selected_dataset_id if isinstance(sel_ctx, DatasetSelectionContext) else None
                 )
@@ -577,7 +757,8 @@ class MultiLLMOrchestrator:
                 allowed_flds = list(raw_allowed_flds) if (raw_allowed_flds is not None and not hasattr(raw_allowed_flds, "_mock_return_value")) else None
                 op_cat_ver = str(raw_op_cat_ver) if (raw_op_cat_ver is not None and not hasattr(raw_op_cat_ver, "_mock_return_value")) else None
 
-                # Update researcher counters
+                # Update researcher counters only for a returned batch. Provider failures
+                # are not successful zero-output generations.
                 u_stmt = (
                     update(ResearchResearcher)
                     .where(ResearchResearcher.id == r_id)
@@ -589,30 +770,6 @@ class MultiLLMOrchestrator:
                     )
                 )
                 await session.execute(u_stmt)
-
-                # Persist durable generation attempt capturing prompt, schema, exact version, and dataset selection
-                attempt = GenerationAttempt(
-                    session_id=session_id,
-                    researcher_id=r_id,
-                    prompt_strategy_id=strat_id,
-                    prompt_version_id=pv_id,
-                    resolution_tier=res_tier,
-                    generation=current_gen,
-                    model_ref=batch.model_ref,
-                    temperature=temp,
-                    system_prompt=batch.system_prompt,
-                    user_prompt=batch.user_prompt,
-                    response_schema=batch.response_schema,
-                    target_dataset_id=t_ds,
-                    catalog_version=cat_ver,
-                    dataset_selection_policy=pol,
-                    dataset_selection_reason=reason,
-                    datafield_catalog_version=df_cat_ver,
-                    allowed_fields=allowed_flds,
-                    operator_catalog_version=op_cat_ver,
-                )
-                session.add(attempt)
-                await session.flush()
 
                 # Persist each candidate with full lineage
                 for c in batch.candidates:
@@ -824,10 +981,75 @@ class MultiLLMOrchestrator:
             "orchestrator.generation_round_complete",
             session_id=session_id,
             generation=current_gen,
-            total_generated=sum(len(item[4].candidates) for item in results),
+            total_generated=sum(
+                len(item.batch.candidates) for item in outcomes if item.batch is not None
+            ),
             valid_candidates=len(valid_candidate_ids),
         )
-        return valid_candidate_ids
+        failed = [
+            item
+            for item in outcomes
+            if item.status in (GenerationAttemptStatus.FAILED, GenerationAttemptStatus.CANCELLED)
+        ]
+        summary = {
+            "attemptedResearchers": len(outcomes),
+            "successfulResearchers": sum(
+                item.status == GenerationAttemptStatus.SUCCEEDED for item in outcomes
+            ),
+            "failedResearchers": sum(
+                item.status == GenerationAttemptStatus.FAILED for item in outcomes
+            ),
+            "cancelledResearchers": sum(
+                item.status == GenerationAttemptStatus.CANCELLED for item in outcomes
+            ),
+            "emptyOutputResearchers": sum(
+                item.validation_outcome == "EMPTY_OUTPUT" for item in outcomes
+            ),
+            "outputValidationFailures": sum(
+                item.validation_outcome == "OUTPUT_VALIDATION_FAILED" for item in outcomes
+            ),
+            "partialSuccess": bool(failed),
+            "generatedCandidates": sum(
+                len(item.batch.candidates) for item in outcomes if item.batch is not None
+            ),
+            "failureDetails": [
+                {
+                    "attemptId": item.attempt_id,
+                    "researcherId": item.researcher_id,
+                    "modelRef": item.model_ref,
+                    "status": item.status,
+                    "retryCount": item.retry_count,
+                    "errorClass": item.error_class,
+                    "errorMessage": item.error_message,
+                    "validationOutcome": item.validation_outcome,
+                }
+                for item in failed
+            ],
+        }
+        return GenerationRoundResult(valid_candidate_ids, summary)
+
+    async def reconcile_generation_attempts(self, stale_after_seconds: int = 900) -> int:
+        """Mark abandoned RUNNING attempts as failed after a bounded stale period."""
+        cutoff = utcnow() - timedelta(seconds=stale_after_seconds)
+        now = utcnow()
+        stmt = (
+            update(GenerationAttempt)
+            .where(
+                GenerationAttempt.status == GenerationAttemptStatus.RUNNING,
+                GenerationAttempt.started_at.is_not(None),
+                GenerationAttempt.started_at < cutoff,
+            )
+            .values(
+                status=GenerationAttemptStatus.FAILED,
+                completed_at=now,
+                error_class="StaleAttemptRecovery",
+                error_message="Attempt recovered after exceeding the stale RUNNING timeout.",
+                validation_outcome="STALE_RECOVERED",
+            )
+        )
+        async with self.db.session() as session:
+            result = await session.execute(stmt)
+            return int(result.rowcount or 0)
 
     async def _resolve_strategy_version(
         self, session: Any, session_id: int, category: str
@@ -1066,6 +1288,7 @@ class MultiLLMOrchestrator:
         delay: int,
         generation: int,
         temperature: float,
+        attempt_id: int,
         winning_examples: list[dict[str, Any]] | None = None,
         anti_patterns: list[dict[str, Any]] | None = None,
         learning_feedback: str = "No prior generation data. Explore baseline anomalies.",
@@ -1076,47 +1299,108 @@ class MultiLLMOrchestrator:
         template_text: str | None = None,
         resolution_tier: str | None = None,
         selection_context: DatasetSelectionContext | None = None,
-    ) -> tuple[int, int | None, int | None, str | None, GenerationBatch, float, DatasetSelectionContext | None]:
-        """Dispatches generation for a single researcher persona with error isolation."""
-        try:
-            batch = await self.pipeline.generate_batch(
-                model_ref=model_ref,
-                category=category,
-                candidate_count=count,
-                region=region,
-                universe=universe,
-                delay=delay,
-                generation=generation,
-                temperature=temperature,
-                winning_examples=winning_examples,
-                anti_patterns=anti_patterns,
-                learning_feedback=learning_feedback,
-                target_dataset_id=selection_context.selected_dataset_id if selection_context else None,
-                selection_context=selection_context,
-                auto_repair=auto_repair,
-                max_repairs=max_repairs,
-                template_text=template_text,
-            )
-            return researcher_id, strategy_id, prompt_version_id, resolution_tier, batch, temperature, selection_context
-        except Exception as exc:
-            log.warning(
-                "orchestrator.researcher_dispatch_failed",
-                researcher_id=researcher_id,
-                model_ref=model_ref,
-                error=str(exc),
-            )
-            # Return empty batch so orchestrator does not crash
-            return researcher_id, strategy_id, prompt_version_id, resolution_tier, GenerationBatch(
-                summary=f"Generation failed: {exc}",
-                candidates=[],
-                model_ref=model_ref,
-                total_tokens=0,
-                duration_seconds=0.0,
-                target_dataset_id=selection_context.selected_dataset_id if selection_context else None,
-                catalog_version=selection_context.catalog_version if selection_context else None,
-                dataset_selection_policy=selection_context.allocation_policy if selection_context else None,
-                dataset_selection_reason=selection_context.selection_reason if selection_context else None,
-            ), temperature, selection_context
+    ) -> ResearcherDispatchOutcome:
+        """Dispatch one logical researcher attempt with bounded transient retries."""
+        started = time.monotonic()
+        retry_count = 0
+        while True:
+            try:
+                batch = await self.pipeline.generate_batch(
+                    model_ref=model_ref,
+                    category=category,
+                    candidate_count=count,
+                    region=region,
+                    universe=universe,
+                    delay=delay,
+                    generation=generation,
+                    temperature=temperature,
+                    winning_examples=winning_examples,
+                    anti_patterns=anti_patterns,
+                    learning_feedback=learning_feedback,
+                    target_dataset_id=selection_context.selected_dataset_id if selection_context else None,
+                    selection_context=selection_context,
+                    auto_repair=auto_repair,
+                    max_repairs=max_repairs,
+                    template_text=template_text,
+                    allow_synthetic_fallback=False,
+                )
+                if not batch.candidates:
+                    status = GenerationAttemptStatus.SUCCEEDED
+                    validation_outcome = "EMPTY_OUTPUT"
+                elif batch.valid_count == 0:
+                    status = GenerationAttemptStatus.FAILED
+                    validation_outcome = "OUTPUT_VALIDATION_FAILED"
+                elif batch.valid_count < len(batch.candidates):
+                    status = GenerationAttemptStatus.SUCCEEDED
+                    validation_outcome = "PARTIAL_VALIDATION"
+                else:
+                    status = GenerationAttemptStatus.SUCCEEDED
+                    validation_outcome = "VALIDATED"
+                return ResearcherDispatchOutcome(
+                    attempt_id=attempt_id,
+                    researcher_id=researcher_id,
+                    model_ref=model_ref,
+                    strategy_id=strategy_id,
+                    prompt_version_id=prompt_version_id,
+                    resolution_tier=resolution_tier,
+                    temperature=temperature,
+                    selection_context=selection_context,
+                    batch=batch,
+                    status=status,
+                    retry_count=retry_count,
+                    latency_seconds=time.monotonic() - started,
+                    validation_outcome=validation_outcome,
+                )
+            except asyncio.CancelledError as exc:
+                return ResearcherDispatchOutcome(
+                    attempt_id=attempt_id,
+                    researcher_id=researcher_id,
+                    model_ref=model_ref,
+                    strategy_id=strategy_id,
+                    prompt_version_id=prompt_version_id,
+                    resolution_tier=resolution_tier,
+                    temperature=temperature,
+                    selection_context=selection_context,
+                    batch=None,
+                    status=GenerationAttemptStatus.CANCELLED,
+                    retry_count=retry_count,
+                    latency_seconds=time.monotonic() - started,
+                    error_class=exc.__class__.__name__,
+                    error_message=_safe_error(exc),
+                    validation_outcome="CANCELLED",
+                )
+            except Exception as exc:
+                if _is_retryable(exc) and retry_count < MAX_RESEARCHER_RETRIES:
+                    retry_count += 1
+                    await asyncio.sleep(min(0.25 * (2 ** (retry_count - 1)), 2.0))
+                    continue
+                error_message = _safe_error(exc)
+                log.warning(
+                    "orchestrator.researcher_dispatch_failed",
+                    researcher_id=researcher_id,
+                    attempt_id=attempt_id,
+                    model_ref=model_ref,
+                    retry_count=retry_count,
+                    error_class=exc.__class__.__name__,
+                    error=error_message,
+                )
+                return ResearcherDispatchOutcome(
+                    attempt_id=attempt_id,
+                    researcher_id=researcher_id,
+                    model_ref=model_ref,
+                    strategy_id=strategy_id,
+                    prompt_version_id=prompt_version_id,
+                    resolution_tier=resolution_tier,
+                    temperature=temperature,
+                    selection_context=selection_context,
+                    batch=None,
+                    status=GenerationAttemptStatus.FAILED,
+                    retry_count=retry_count,
+                    latency_seconds=time.monotonic() - started,
+                    error_class=exc.__class__.__name__,
+                    error_message=error_message,
+                    validation_outcome="PROVIDER_FAILURE",
+                )
 
     async def enqueue_candidates_for_simulation(
         self,

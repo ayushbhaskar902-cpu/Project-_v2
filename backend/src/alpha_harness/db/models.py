@@ -634,6 +634,15 @@ class ResearchStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class GenerationAttemptStatus(StrEnum):
+    """Durable outcome states for one logical researcher dispatch."""
+
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
 class CandidateStatus(StrEnum):
     """Lifecycle of one generated alpha candidate."""
 
@@ -913,6 +922,20 @@ class GenerationAttempt(Base):
     allowed_fields: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
     #: P1-06: Authoritative operator catalog version
     operator_catalog_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: P2-03: explicit lifecycle and outcome accounting. Legacy rows remain NULL.
+    status: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    retry_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_class: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    latency_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    candidate_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    token_usage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    validation_outcome: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
 
 
