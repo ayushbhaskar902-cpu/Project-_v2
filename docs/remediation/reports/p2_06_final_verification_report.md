@@ -2,11 +2,11 @@
 
 **Canonical issue:** Composite score is hard-coded without calibrated justification.
 
-**Status:** **VERIFIED COMPLETE — COMMITTED LOCALLY; PUSH PENDING** (all verification gates passed; implementation checkpoint is `d6a18ced8dd9497b365d024b30686197ce803cdb`).
+**Status:** **VERIFIED COMPLETE — PUSHED AND REMOTE CONFIRMED.** The implementation checkpoint is `d6a18ced8dd9497b365d024b30686197ce803cdb`; the report/tracking synchronization checkpoint `d1b417fdf288dd4e568c898cbb9bce2900e1ba7e` is present on `origin/main`.
 
 **Approval:** Approved for implementation on 2026-10-20. No approval to recalibrate weights was given or inferred.
 
-**Repository base:** `01a12ba16c4e82a5017027d53ab85b99077f435d` (`main`, same as `origin/main` before checkpoint). Implementation checkpoint: `d6a18ced8dd9497b365d024b30686197ce803cdb`; push is pending.
+**Repository base:** `01a12ba16c4e82a5017027d53ab85b99077f435d`. Implementation checkpoint: `d6a18ced8dd9497b365d024b30686197ce803cdb`. The reporting checkpoint `d1b417fdf288dd4e568c898cbb9bce2900e1ba7e` was pushed normally (no force) and `git ls-remote` confirmed it exactly matches `origin/main`.
 
 **Latest tested source/test snapshot:** base `01a12ba16c4e82a5017027d53ab85b99077f435d`, with local modifications. SHA-256 of the sorted path-and-file-hash manifest over every modified/untracked backend source, backend test, and frontend source file: `50d85f47b06f3844778d5108c7a6c5fe3da413f41192e573b15df58ac848fd36` (12 files). The source snapshot includes the final lint-only line wrap in researcher memory. `origin/main` was last refreshed at `01a12ba16c4e82a5017027d53ab85b99077f435d`; a final refresh is required before checkpointing.
 
@@ -91,4 +91,4 @@ The full backend suite was attempted once after a lint-only line-wrap correction
 
 Independent source/test review found and corrected two Ruff E501 findings on changed lines; no behavioral defect remains identified within P2-06. The behavioral tests exercise persistence reopen/migration, actual API endpoint payloads, downstream leaderboard and memory consumption, portfolio selection, and holdout mutation rather than relying only on formula helpers. Existing formula coefficients remain untouched. Deferred calibration, ablation, sensitivity analysis, historical-version inventory, and cross-cohort robustness remain open; `DEFERRED-TEST-01` and all other prior entries are preserved.
 
-**Verification decision:** P2-06 is **VERIFIED COMPLETE** on the exact manifest above and has been committed locally as `d6a18ced8dd9497b365d024b30686197ce803cdb`. The staged-file list was reviewed and contained only 17 intended P2-06 implementation, test, and tracking files; the pre-existing untracked `p2_07_audit_report.md` remains excluded. `origin/main` was refreshed immediately before this commit and was still the base revision. Push confirmation remains pending. P2-07 is gated until the checkpoint is confirmed remotely.
+**Verification decision:** P2-06 is **VERIFIED COMPLETE** on the exact manifest above. The implementation checkpoint `d6a18ced8dd9497b365d024b30686197ce803cdb` and reporting checkpoint `d1b417fdf288dd4e568c898cbb9bce2900e1ba7e` were pushed with a normal fast-forward update; immediately afterward local `HEAD` and `git ls-remote origin refs/heads/main` both returned `d1b417fdf288dd4e568c898cbb9bce2900e1ba7e`. The staged-file list contained only 17 intended P2-06 implementation, test, and tracking files; the pre-existing untracked `p2_07_audit_report.md` remains excluded. P2-07 implementation remains gated on this verified checkpoint and was not started.
