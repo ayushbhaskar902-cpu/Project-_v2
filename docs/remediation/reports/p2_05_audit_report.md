@@ -1,7 +1,7 @@
 # P2-05 Audit Report — Reproducibility Is Compromised by Randomized Synthetic Seeds
 
-**Status:** AUDIT APPROVED — IMPLEMENTATION IN PROGRESS; VERIFICATION PENDING  
-**Canonical issue:** P2-05 — Reproducibility is compromised by randomized synthetic seeds.  
+**Status:** VERIFIED COMPLETE — independent runner and source audit passed
+**Canonical issue:** P2-05 — Reproducibility is compromised by randomized synthetic seeds.
 **Implementation branch:** `wip/p2-05-reproducible-seeds`.
 
 ## Canonical issue
@@ -39,4 +39,4 @@ The suspected integrity violation is **not substantiated in the inspected produc
 
 ## Scope boundary
 
-This audit does not authorize P2-06. P2-05 implementation is approved by the user, but remains **unverified** until targeted, regression, and complete backend suites pass on the independent runner. It does not change the P2-04 backfill lifecycle, statistical methods, or holdout policy.
+P2-05 is **VERIFIED COMPLETE** on source commit `0f9dc7f955eb832a34d1ac7a47da6a4163e2c463`; see [`p2_05_final_verification_report.md`](p2_05_final_verification_report.md) for the run URL, suite counts, warnings, and acceptance evidence. This audit does not authorize implementation of P2-06. P2-05 does not change the P2-04 backfill lifecycle, statistical methods, or holdout policy.

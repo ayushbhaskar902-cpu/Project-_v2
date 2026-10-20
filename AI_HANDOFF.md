@@ -3,7 +3,7 @@
 **Repository:** `https://github.com/ayushbhaskar902-cpu/Project-_v2.git`  
 **Target Branch:** `main`  
 **Current Date:** October 20, 2026  
-**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, and P2-01 through P2-04 are **VERIFIED COMPLETE**. P2-04 passed the independent GitHub runner at source commit `7fd19e3d6343ed74a48d302b3bb918422b718c79`: 353 backend tests, 9 frontend status tests, `pnpm check`, and `pnpm build`; 39 async teardown warnings remain tracked as `DEFERRED-TEST-01`. P2-05 implementation is in progress on `wip/p2-05-reproducible-seeds` and remains **UNVERIFIED** pending independent runner results. P2-06 has not been implemented and is for audit review next.
+**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, and P2-01 through P2-05 are **VERIFIED COMPLETE**. P2-05 passed independent GitHub Actions run [39448158145](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39448158145) on source commit `0f9dc7f955eb832a34d1ac7a47da6a4163e2c463`: 362 backend tests passed, including P2-05 (9), P2-04 (9), P2-01 (9), P0 (60), P1 (269), P2-02 (5), and P2-03 (7); frontend tests/check/build succeeded. Forty existing async teardown warnings remain tracked as `DEFERRED-TEST-01`. P2-06 is not implemented and is pending audit/review only.
 
 ---
 
@@ -94,7 +94,7 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 | **P2-02** | Simulation timeout & cancellation handling | ⬜ Tracked |
 | **P2-03** | Researcher failures may be converted into missing output | ✅ **VERIFIED COMPLETE** |
 | **P2-04** | BRAIN result backfill failure is not a terminally modeled state | ✅ **VERIFIED COMPLETE** |
-| **P2-05** | Reproducibility is compromised by randomized synthetic seeds | ⚙️ **IMPLEMENTED — UNVERIFIED** |
+| **P2-05** | Reproducibility is compromised by randomized synthetic seeds | ✅ **VERIFIED COMPLETE** |
 | **P2-06** | Composite score is hard-coded without calibrated justification | 🔍 **NEXT AUDIT — NOT IMPLEMENTED** |
 | **P2-07** | Automated repair logging & repair cycle detection | ⬜ Tracked |
 | **P2-08** | Multi-session concurrency & researcher pool isolation | ⬜ Tracked |
@@ -108,9 +108,12 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 
 ---
 
-## 4. Next Step: Verify P2-05, Then Audit P2-06
+## 4. Next Step: Audit P2-06 for Review Only
 
-P2-01 and P2-02 implementation work is documented in [`docs/remediation/reports/p2_01_final_verification_report.md`](docs/remediation/reports/p2_01_final_verification_report.md) and [`docs/remediation/reports/p2_02_final_verification_report.md`](docs/remediation/reports/p2_02_final_verification_report.md). P2-03 and P2-04 verification reports are also recorded in `docs/remediation/reports/`. P2-05 implementation and its audit rationale are in [`docs/remediation/reports/p2_05_audit_report.md`](docs/remediation/reports/p2_05_audit_report.md), but it remains unverified until the independent test run completes. After that, prepare P2-06's audit for review only; do not implement P2-06 without approval.
+P2-01 through P2-05 verification reports are recorded in `docs/remediation/reports/`; P2-05's final evidence is [`docs/remediation/reports/p2_05_final_verification_report.md`](docs/remediation/reports/p2_05_final_verification_report.md). Next, read the complete P2-06 audit report and verify its claims against the canonical backlog and source. Present findings for review only; do not implement P2-06 without approval.
+
+### P2-05 Verification Summary
+P2-05 now derives versioned SHA-256 seeds from canonical configuration and unique persisted run identities, persists seed provenance, and routes output-affecting lab randomness through explicit local RNGs. Legacy records without matching provenance remain unknown; unseeded legacy tasks are not silently continued. Independent run 39448158145 passed 9 targeted P2-05 tests and all regression suites; the 362-test backend suite had zero failures/errors/skips and 40 existing async teardown warnings. Frontend tests/check/build succeeded. Full evidence and the documented provider-response persistence boundary are in `docs/remediation/reports/p2_05_final_verification_report.md`.
 
 ### P2-03 Verification Summary
 P2-03 now creates a durable `RUNNING` `GenerationAttempt` before each researcher provider call, records terminal provider/validation/cancellation/orchestration outcomes, applies bounded transient retries, preserves successful siblings and candidate lineage, exposes additive partial-round status through the API/UI, and recovers stale attempts. Focused P2-03 tests: 4 passed. Relevant regression tests: 146 passed with 1 existing async warning. Full backend suite: 343 passed, 21 existing async teardown warnings, exit code 0.
