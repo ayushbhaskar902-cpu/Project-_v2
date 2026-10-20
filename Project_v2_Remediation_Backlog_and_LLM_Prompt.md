@@ -236,7 +236,7 @@
 **Fix:** Version the score definition, expose components separately, define weights in validated configuration, and benchmark it against predeclared portfolio objectives. Never hide hard thresholds in code. Report score version on every row.  
 **Acceptance tests:** Score can be reproduced from stored components and version; config validation prevents nonsensical weights; ablation results are documented.
 
-**Audit status:** **AUDITED — PENDING APPROVAL.** Source review confirms two hard-coded formulas, distinct missing-value defaults, the legacy zero-turnover fallback, no explicit finite-value validation in the score path, persisted scores without a dedicated formula-version field, and downstream ranking/selection use. Empirical invalidity or material ranking distortion is **not established**. See `docs/remediation/reports/p2_06_audit_report.md`. No implementation or weight change is authorized by this audit.
+**Status:** **VERIFIED COMPLETE LOCALLY — CHECKPOINT PENDING.** User approval was given on 2026-10-20. Formula versioning, compatibility handling, and finite-value protections passed focused persisted-consumer tests; the lock-matched backend full suite passed (384 passed, 53 warnings), the LF frontend repository check/tests/build passed, changed-line Ruff had zero new diagnostics, and `git diff --check` passed. The final local source/test snapshot is recorded in `docs/remediation/reports/p2_06_final_verification_report.md`. No weight recalibration is authorized; calibration, ablation, sensitivity, historical-version inventory, and cross-cohort analysis remain deferred. Do not begin P2-07 until the verified P2-06 checkpoint is committed and confirmed on origin.
 
 ### P2-07 — State transitions and concurrency need stronger guarantees
 
@@ -244,6 +244,8 @@
 **Problem:** Research steps are asynchronous and result arrival/backfill can race with evaluation or learning.  
 **Fix:** Implement guarded state transitions, transaction boundaries, idempotency keys, locking/unique constraints where needed, and a rule that learning only runs over a frozen, fully evaluated generation.  
 **Acceptance tests:** Concurrent duplicate requests do not create duplicate simulations/evaluations; learning refuses incomplete generations; restart/resume is tested.
+
+**Audit status:** **AUDIT APPROVED FOR IMPLEMENTATION, SEQUENCED AFTER P2-06 CHECKPOINT.** User approval was given on 2026-10-20. Do not begin P2-07 implementation until P2-06 passes its full verification gate and is safely checkpointed. Findings, mitigations, open assumptions, and proposed tests are in `docs/remediation/reports/p2_07_audit_report.md`.
 
 ### P2-08 — Rate-limit and retry behavior need auditable policies
 

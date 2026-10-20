@@ -4,7 +4,7 @@
 
 **Canonical problem statement:** “A weighted formula ranks Sharpe, Fitness, decay and turnover using fixed weights. It may be a useful heuristic, but no calibration/ablation evidence is demonstrated.”
 
-**Audit status:** AUDITED — PENDING APPROVAL
+**Audit status:** AUDITED — APPROVED FOR IMPLEMENTATION. Implementation verification is recorded separately in `p2_06_final_verification_report.md` (verified locally; checkpoint pending).
 
 **Scope:** Source and backlog audit only. No P2-06 code, weights, schema, or runtime behavior were changed.
 
@@ -66,4 +66,4 @@ The confirmed risk is auditability and reproducibility: a scalar score directly 
 
 ## Decision requested
 
-P2-06 is **AUDITED — PENDING APPROVAL**. Review the findings, especially the proposed legacy zero-turnover policy and the required evidence protocol. No P2-06 implementation or weight change has been made.
+P2-06 was approved for implementation by the user on 2026-10-20. The implementation is now verified locally; final evidence and the source snapshot are in [`p2_06_final_verification_report.md`](p2_06_final_verification_report.md). This audit does not authorize weight recalibration. P2-07 remains gated on confirmation of the P2-06 checkpoint.

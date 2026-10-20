@@ -68,14 +68,23 @@ def test_generated_preview_is_stable_across_process_hash_seeds() -> None:
     ):
         env = os.environ.copy()
         env["PYTHONHASHSEED"] = hash_seed
+        # The child imports NumPy; cap BLAS worker creation so full-suite parent
+        # processes cannot exhaust memory/thread resources during this test.
+        env["OPENBLAS_NUM_THREADS"] = "1"
+        env["OMP_NUM_THREADS"] = "1"
+        env["MKL_NUM_THREADS"] = "1"
         proc = subprocess.run(
             [sys.executable, "-c", code, identity],
             cwd=backend,
             env=env,
             capture_output=True,
-            check=True,
+            check=False,
             text=True,
             timeout=20,
+        )
+        assert proc.returncode == 0, (
+            f"seeded preview subprocess failed (hash seed {hash_seed}, identity {identity}):\n"
+            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
         )
         outputs.append(proc.stdout.strip())
     assert outputs[0] == outputs[1]

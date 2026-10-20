@@ -200,8 +200,10 @@ def _multiplicity_corrected_split(
     if m == 0:
         return [], []
 
-    # Pre-sort by composite_score descending (preserves stable order when composite_score is identical)
-    records.sort(key=lambda r: float(r.get("composite_score") or 0.0), reverse=True)
+    # Stable score order; candidate identity breaks ties independently of query order.
+    records.sort(
+        key=lambda r: (-float(r.get("composite_score") or 0.0), int(r.get("candidate_id", 0)))
+    )
 
     # 1. Cohort baseline: median Sharpe (robust to outliers)
     sharpes = sorted(float(r["sharpe"]) for r in records)
@@ -287,7 +289,9 @@ def _multiplicity_corrected_split(
     losers = [r for r in records[cutoff_top:] if r["selection_tier"] in ("SIGNIFICANT_LOSER", "CANDIDATE_POOL_UNDERPERFORMER")]
 
     # Sort winners: primary by composite_score descending (preserves stable order when composite_score is not set)
-    winners.sort(key=lambda r: float(r.get("composite_score") or 0.0), reverse=True)
+    winners.sort(
+        key=lambda r: (-float(r.get("composite_score") or 0.0), int(r.get("candidate_id", 0)))
+    )
 
     # Sort losers by z-score ascending (worst relative performers first)
     losers.sort(key=lambda r: float(r["z_score"]))
@@ -452,6 +456,20 @@ class ResearchMemory:
                     if ev.val_composite_score is not None
                     else (ev.composite_score or 0.0)
                 )
+                score_metrics = (
+                    v_composite,
+                    v_sharpe,
+                    v_fitness,
+                    v_after_cost,
+                    v_decay,
+                    v_turnover,
+                )
+                invalid_metrics = any(
+                    not math.isfinite(float(value)) for value in score_metrics
+                ) or v_turnover < 0
+                if invalid_metrics:
+                    log.warning("memory.skip_invalid_metrics", candidate_id=cand.id)
+                    continue
 
                 # P1-10: Estimate observation length T (in years) for SE calculation
                 t_years = _estimate_observation_years(ev)
@@ -473,6 +491,7 @@ class ResearchMemory:
                         "sharpe_decay": v_decay,
                         "turnover": v_turnover,
                         "composite_score": v_composite,
+                        "composite_score_spec": ev.composite_score_spec,
                         "is_submission_grade": (
                             (ev.internal_checks is not None or ev.checks is None)
                             and ev.checks_passed == ev.checks_total
@@ -575,6 +594,20 @@ class ResearchMemory:
                     if ev.val_composite_score is not None
                     else (ev.composite_score or 0.0)
                 )
+                score_metrics = (
+                    v_composite,
+                    v_sharpe,
+                    v_fitness,
+                    v_after_cost,
+                    v_decay,
+                    v_turnover,
+                )
+                invalid_metrics = any(
+                    not math.isfinite(float(value)) for value in score_metrics
+                ) or v_turnover < 0
+                if invalid_metrics:
+                    log.warning("memory.skip_invalid_metrics", candidate_id=cand.id)
+                    continue
 
                 # P1-10: Estimate observation length T (in years) for SE calculation
                 t_years = _estimate_observation_years(ev)
@@ -596,6 +629,7 @@ class ResearchMemory:
                         "sharpe_decay": v_decay,
                         "turnover": v_turnover,
                         "composite_score": v_composite,
+                        "composite_score_spec": ev.composite_score_spec,
                         "is_submission_grade": (
                             (ev.internal_checks is not None or ev.checks is None)
                             and ev.checks_passed == ev.checks_total
@@ -606,7 +640,9 @@ class ResearchMemory:
                 )
             if records:
                 _multiplicity_corrected_split(records)
-            records.sort(key=lambda r: float(r["composite_score"]), reverse=True)
+            records.sort(
+                key=lambda r: (-float(r["composite_score"]), int(r.get("candidate_id", 0)))
+            )
             return records
 
     async def compute_operator_stats(

@@ -43,6 +43,10 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+VALIDATION_COMPOSITE_VERSION = "validation-composite-v1"
+LEGACY_COMPOSITE_VERSION = "legacy-composite-v1"
+LEGACY_COMPOSITE_CURRENT_VERSION = "legacy-composite-v2"
+
 # Standard WorldQuant BRAIN submission thresholds
 DEFAULT_MIN_SHARPE = 1.25
 DEFAULT_MIN_FITNESS = 1.00
@@ -105,6 +109,7 @@ class EvaluationScorecard:
 
     # Composite score (in 3-way split, mirrors val_composite_score for backward compatibility)
     composite_score: float | None = None
+    composite_score_spec: dict[str, Any] | None = None
 
     # Validation check results
     checks: dict[str, bool] = field(default_factory=dict)
@@ -140,11 +145,11 @@ def compute_validation_composite_score(
       0.50 * ValAfterCostSharpe + 0.35 * ValFitness - 0.15 * min(ValTurnover, 1.0)
     All components are calculated exclusively from validation partition data.
     """
-    ac_sharpe = val_after_cost_sharpe_val or 0.0
-    fit = fitness_val or 0.0
-    to = turnover_val if turnover_val is not None else 0.20
+    ac_sharpe = _score_input(val_after_cost_sharpe_val, "validation_after_cost_sharpe", 0.0)
+    fit = _score_input(fitness_val, "validation_fitness", 0.0)
+    to = _score_turnover(turnover_val, "validation_turnover", missing_default=0.20)
     score = 0.50 * ac_sharpe + 0.35 * fit - 0.15 * min(to, 1.0)
-    return round(float(score), 4)
+    return _finish_score(score)
 
 
 def compute_composite_score(
@@ -158,14 +163,140 @@ def compute_composite_score(
     Formula:
       0.40 * AfterCostSharpe + 0.30 * Fitness + 0.20 * (1 - clamped_decay) - 0.10 * Turnover
     """
-    ac_sharpe = after_cost_sharpe_val or 0.0
-    fit = fitness_val or 0.0
-    decay = sharpe_decay_val if sharpe_decay_val is not None else 0.5
+    ac_sharpe = _score_input(after_cost_sharpe_val, "after_cost_sharpe", 0.0)
+    fit = _score_input(fitness_val, "fitness", 0.0)
+    decay = _score_input(sharpe_decay_val, "sharpe_decay", 0.5)
     clamped_decay = min(max(decay, 0.0), 1.0)
-    to = turnover_val or 0.20
+    # v1 is retained as a compatibility helper: its historic truthiness fallback is
+    # deliberately preserved, while new legacy evaluations use v2 below.
+    to = 0.20 if turnover_val is None or turnover_val == 0 else _score_turnover(
+        turnover_val, "turnover", missing_default=0.20
+    )
 
     score = 0.40 * ac_sharpe + 0.30 * fit + 0.20 * (1.0 - clamped_decay) - 0.10 * min(to, 1.0)
-    return round(float(score), 4)
+    return _finish_score(score)
+
+
+def compute_legacy_composite_score_v2(
+    after_cost_sharpe_val: float | None,
+    fitness_val: float | None,
+    sharpe_decay_val: float | None,
+    turnover_val: float | None,
+) -> float:
+    """Current legacy formula: same weights, but valid zero turnover remains zero."""
+    sharpe = _score_input(after_cost_sharpe_val, "after_cost_sharpe", 0.0)
+    fitness = _score_input(fitness_val, "fitness", 0.0)
+    decay = min(max(_score_input(sharpe_decay_val, "sharpe_decay", 0.5), 0.0), 1.0)
+    turnover = _score_turnover(turnover_val, "turnover", missing_default=0.20)
+    score = 0.40 * sharpe + 0.30 * fitness + 0.20 * (1.0 - decay) - 0.10 * min(turnover, 1.0)
+    return _finish_score(score)
+
+
+def _score_input(value: float | None, name: str, default: float) -> float:
+    result = default if value is None else float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"Composite score input {name} must be finite")
+    return result
+
+
+def _finish_score(value: float) -> float:
+    if not math.isfinite(value):
+        raise ValueError("Computed composite score must be finite")
+    return round(float(value), 4)
+
+
+def _score_turnover(value: float | None, name: str, *, missing_default: float) -> float:
+    turnover = _score_input(value, name, missing_default)
+    if turnover < 0:
+        raise ValueError(f"Composite score input {name} must not be negative")
+    return turnover
+
+
+def composite_score_spec(
+    *, formula_id: str, components: dict[str, float | None]
+) -> dict[str, Any]:
+    """JSON provenance sufficient to identify and reproduce a newly computed score."""
+    policies: dict[str, Any] = {
+        VALIDATION_COMPOSITE_VERSION: {
+            "coefficients": {
+                "validation_after_cost_sharpe": 0.50,
+                "validation_fitness": 0.35,
+                "validation_turnover": -0.15,
+            },
+            "missing_defaults": {
+                "validation_after_cost_sharpe": 0.0,
+                "validation_fitness": 0.0,
+                "validation_turnover": 0.20,
+            },
+            "turnover": "reject negative; upper-clamp at 1.0",
+        },
+        LEGACY_COMPOSITE_VERSION: {
+            "coefficients": {
+                "after_cost_sharpe": 0.40,
+                "fitness": 0.30,
+                "sharpe_decay": -0.20,
+                "turnover": -0.10,
+            },
+            "constant": 0.20,
+            "missing_defaults": {
+                "after_cost_sharpe": 0.0,
+                "fitness": 0.0,
+                "sharpe_decay": 0.5,
+                "turnover": 0.20,
+            },
+            "turnover": (
+                "legacy truthiness fallback: None and zero default to 0.20; upper-clamp at 1.0"
+            ),
+        },
+        LEGACY_COMPOSITE_CURRENT_VERSION: {
+            "coefficients": {
+                "after_cost_sharpe": 0.40,
+                "fitness": 0.30,
+                "sharpe_decay": -0.20,
+                "turnover": -0.10,
+            },
+            "constant": 0.20,
+            "missing_defaults": {
+                "after_cost_sharpe": 0.0,
+                "fitness": 0.0,
+                "sharpe_decay": 0.5,
+                "turnover": 0.20,
+            },
+            "turnover": (
+                "None defaults to 0.20; zero is observed; reject negative; upper-clamp at 1.0"
+            ),
+        },
+    }
+    if formula_id not in policies:
+        raise ValueError(f"Unknown composite formula version: {formula_id}")
+    return {
+        "formula_id": formula_id,
+        "status": "VERIFIED",
+        "components": components,
+        **policies[formula_id],
+        "rounding": {"method": "round-half-to-even via Python round", "decimal_places": 4},
+    }
+
+
+def recompute_composite_score(spec: dict[str, Any]) -> float:
+    """Recompute a score from its persisted, versioned component specification."""
+    parts = spec["components"]
+    formula = spec["formula_id"]
+    if formula == VALIDATION_COMPOSITE_VERSION:
+        return compute_validation_composite_score(
+            parts["validation_after_cost_sharpe"],
+            parts["validation_fitness"],
+            parts["validation_turnover"],
+        )
+    if formula == LEGACY_COMPOSITE_VERSION:
+        return compute_composite_score(
+            parts["after_cost_sharpe"], parts["fitness"], parts["sharpe_decay"], parts["turnover"]
+        )
+    if formula == LEGACY_COMPOSITE_CURRENT_VERSION:
+        return compute_legacy_composite_score_v2(
+            parts["after_cost_sharpe"], parts["fitness"], parts["sharpe_decay"], parts["turnover"]
+        )
+    raise ValueError(f"Unknown composite formula version: {formula}")
 
 
 def evaluate_pnl_series(
@@ -197,6 +328,10 @@ def evaluate_pnl_series(
 
     pnl_arr = np.array(pnl_series, dtype=np.float64)
     to_arr = np.array(turnover_series, dtype=np.float64)
+    if not np.isfinite(pnl_arr).all() or not np.isfinite(to_arr).all():
+        raise ValueError("PnL and turnover observations must all be finite")
+    if np.any(to_arr < 0):
+        raise ValueError("Turnover observations must not be negative")
 
     # 1. Legacy 2-Way Evaluation Mode
     if legacy_2way:
@@ -251,11 +386,24 @@ def evaluate_pnl_series(
         else:
             scorecard.sharpe_decay = 0.0
 
-        scorecard.composite_score = compute_composite_score(
+        legacy_components = {
+            "after_cost_sharpe": scorecard.after_cost_sharpe,
+            "fitness": scorecard.full_fitness,
+            "sharpe_decay": scorecard.sharpe_decay,
+            "turnover": (
+                scorecard.is_turnover
+                if scorecard.is_turnover is not None
+                else (full_st.turnover if full_st else None)
+            ),
+        }
+        scorecard.composite_score = compute_legacy_composite_score_v2(
             scorecard.after_cost_sharpe,
             scorecard.full_fitness,
             scorecard.sharpe_decay,
-            scorecard.is_turnover or (full_st.turnover if full_st else None),
+            legacy_components["turnover"],
+        )
+        scorecard.composite_score_spec = composite_score_spec(
+            formula_id=LEGACY_COMPOSITE_CURRENT_VERSION, components=legacy_components
         )
 
         checks: dict[str, bool] = {}
@@ -346,6 +494,14 @@ def evaluate_pnl_series(
         scorecard.val_turnover,
     )
     scorecard.composite_score = scorecard.val_composite_score
+    scorecard.composite_score_spec = composite_score_spec(
+        formula_id=VALIDATION_COMPOSITE_VERSION,
+        components={
+            "validation_after_cost_sharpe": scorecard.val_after_cost_sharpe,
+            "validation_fitness": scorecard.val_fitness,
+            "validation_turnover": scorecard.val_turnover,
+        },
+    )
 
     # Diagnostic only: IS-versus-Validation Decay
     if scorecard.is_sharpe is not None and scorecard.val_sharpe is not None:
@@ -522,6 +678,7 @@ class EvaluationEngine:
                     val_drawdown=scorecard.val_drawdown,
                     val_after_cost_sharpe=scorecard.val_after_cost_sharpe,
                     val_composite_score=scorecard.val_composite_score,
+                    composite_score_spec=scorecard.composite_score_spec,
                     is_val_decay=scorecard.is_val_decay,
                     holdout_sharpe=None,
                     holdout_fitness=None,
@@ -567,6 +724,7 @@ class EvaluationEngine:
                 existing_eval.val_drawdown = scorecard.val_drawdown
                 existing_eval.val_after_cost_sharpe = scorecard.val_after_cost_sharpe
                 existing_eval.val_composite_score = scorecard.val_composite_score
+                existing_eval.composite_score_spec = scorecard.composite_score_spec
                 existing_eval.is_val_decay = scorecard.is_val_decay
                 existing_eval.oos_sharpe = scorecard.oos_sharpe
                 existing_eval.oos_fitness = scorecard.oos_fitness

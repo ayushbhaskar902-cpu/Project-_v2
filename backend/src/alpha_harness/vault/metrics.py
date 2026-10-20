@@ -67,7 +67,12 @@ def _day(value: Any) -> date | None:
 
 
 def _number(value: Any) -> float | None:
-    return float(value) if isinstance(value, int | float) else None
+    if not isinstance(value, int | float):
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("Metric value must be finite")
+    return number
 
 
 def daily_rows(
@@ -217,6 +222,10 @@ def with_closing(
 def stats(pnl: Floats, turnover: Floats, *, trim: bool = True) -> Stats | None:
     """The platform's stat block over these days. ``trim`` drops the idle days before the first
     trade, as BRAIN's IS, train and test blocks do; its yearly rows keep them."""
+    if not np.isfinite(pnl).all() or not np.isfinite(turnover).all():
+        raise ValueError("PnL and turnover observations must all be finite")
+    if np.any(turnover < 0):
+        raise ValueError("Turnover observations must not be negative")
     if trim:
         active = np.flatnonzero((pnl != 0) | (turnover != 0))
         if not active.size:
@@ -241,7 +250,14 @@ def stats(pnl: Floats, turnover: Floats, *, trim: bool = True) -> Stats | None:
         if sharpe is not None
         else None
     )
-    return Stats(total, returns, mean_turnover, drawdown, margin, sharpe, fitness, days)
+    result = Stats(total, returns, mean_turnover, drawdown, margin, sharpe, fitness, days)
+    derived = (result.pnl, result.returns, result.turnover, result.drawdown, result.margin)
+    optional_derived = (result.sharpe, result.fitness)
+    if not all(math.isfinite(value) for value in derived) or any(
+        value is not None and not math.isfinite(value) for value in optional_derived
+    ):
+        raise ValueError("Computed performance metrics must all be finite")
+    return result
 
 
 def windows(

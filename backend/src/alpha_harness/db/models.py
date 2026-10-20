@@ -1202,6 +1202,8 @@ class ResearchEvaluation(Base):
     val_drawdown: Mapped[float | None] = mapped_column(Float, nullable=True)
     val_after_cost_sharpe: Mapped[float | None] = mapped_column(Float, nullable=True)
     val_composite_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    #: Formula identity and exact input/default policy; NULL means historical unknown.
+    composite_score_spec: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     #: Diagnostic only (IS-vs-Validation decay; strictly excluded from selection score)
     is_val_decay: Mapped[float | None] = mapped_column(Float, nullable=True)

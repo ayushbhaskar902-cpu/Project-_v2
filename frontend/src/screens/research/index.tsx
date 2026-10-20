@@ -64,6 +64,7 @@ interface AlphaRank {
   modelLabel: string
   generation: number
   compositeScore: number
+  compositeScoreSpec: { formula_id?: string; status?: string } | null
   fullSharpe: number
   afterCostSharpe: number
   oosSharpe: number
@@ -186,6 +187,7 @@ interface PoolResult {
     fitness: number
     turnover: number
     compositeScore: number
+    compositeScoreSpec: { formula_id?: string; status?: string } | null
     weight: number
   }>
   correlationMatrix: number[][]
@@ -739,7 +741,17 @@ export function ResearchStudioScreen() {
                           {a.fitness.toFixed(2)}
                         </td>
                         <td className="py-2.5 px-3 text-right font-mono font-bold text-primary">
-                          {a.compositeScore.toFixed(3)}
+                          <span
+                            title={
+                              a.compositeScoreSpec?.formula_id ??
+                              'Historical score: formula unknown'
+                            }
+                          >
+                            {a.compositeScore.toFixed(3)}
+                          </span>
+                          <span className="ml-1 text-[9px] font-normal text-ink-muted">
+                            {a.compositeScoreSpec?.formula_id ?? 'unknown'}
+                          </span>
                         </td>
                         <td className="py-2.5 px-3 text-center">
                           {a.isSubmissionGrade ? (

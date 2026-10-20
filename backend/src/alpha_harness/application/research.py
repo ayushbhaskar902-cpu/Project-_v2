@@ -312,6 +312,7 @@ class ResearchWorkflowService:
                 "fitness": ev.val_fitness if (is_3way and ev.val_fitness is not None) else (ev.full_fitness or 0.0),
                 "turnover": ev.val_turnover if (is_3way and ev.val_turnover is not None) else (ev.is_turnover or 0.15),
                 "composite_score": ev.val_composite_score if (is_3way and ev.val_composite_score is not None) else (ev.composite_score or 0.0),
+                "composite_score_spec": ev.composite_score_spec,
             })
             pnl_map[cid] = [p for _, (p, _) in days_data]
             to_map[cid] = [t for _, (_, t) in days_data]
@@ -343,6 +344,7 @@ class ResearchWorkflowService:
                     "fitness": m.fitness,
                     "turnover": m.turnover,
                     "compositeScore": m.composite_score,
+                    "compositeScoreSpec": m.composite_score_spec,
                     "weight": m.weight,
                 }
                 for m in pool_result.members

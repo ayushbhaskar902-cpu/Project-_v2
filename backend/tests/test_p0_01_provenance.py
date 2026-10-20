@@ -195,6 +195,10 @@ def test_evaluate_candidate_success_stores_verified_provenance(tmp_path: Path):
                 assert eval_row.is_verified is True
                 assert eval_row.provenance == "BRAIN_VAULT"
                 assert eval_row.full_sharpe == scorecard.full_sharpe
+                assert eval_row.composite_score_spec == scorecard.composite_score_spec
+                assert eval_row.composite_score_spec["formula_id"] == "legacy-composite-v2"
+                assert eval_row.composite_score == scorecard.composite_score
+                assert eval_row.val_composite_score == scorecard.val_composite_score
         finally:
             await db.dispose()
             await cat.close()

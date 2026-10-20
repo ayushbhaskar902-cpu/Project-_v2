@@ -3,7 +3,7 @@
 **Repository:** `https://github.com/ayushbhaskar902-cpu/Project-_v2.git`  
 **Target Branch:** `main`  
 **Current Date:** October 20, 2026  
-**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, and P2-01 through P2-05 are **VERIFIED COMPLETE**. P2-05 passed independent GitHub Actions run [39449762941](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39449762941) on checkpoint `4e3fce62c3d57f0fb49d093203e177ae610f0d6d`: 362 backend tests passed, including P2-05 (9), P2-04 (9), P2-01 (9), P0 (60), P1 (269), P2-02 (5), and P2-03 (7); frontend tests/check/build succeeded. Twenty-five full-suite async teardown warnings remain tracked as `DEFERRED-TEST-01`. P2-06 has been audited and is pending approval; it is not implemented.
+**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, and P2-01 through P2-05 are **VERIFIED COMPLETE**. P2-05 passed independent GitHub Actions run [39449762941](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39449762941) on checkpoint `4e3fce62c3d57f0fb49d093203e177ae610f0d6d`: 362 backend tests passed, including P2-05 (9), P2-04 (9), P2-01 (9), P0 (60), P1 (269), P2-02 (5), and P2-03 (7); frontend tests/check/build succeeded. Twenty-five full-suite async teardown warnings remain tracked as `DEFERRED-TEST-01`. P2-06 is **VERIFIED COMPLETE LOCALLY — CHECKPOINT PENDING**: lock-matched full backend 384 passed/53 warnings; focused 23 passed; affected regressions 127 passed/17 warnings; LF frontend check, 9 tests, and production build passed; changed-line Ruff and diff checks passed. See the final report for the exact source snapshot and commands. P2-07 implementation remains gated on publishing and confirming the P2-06 checkpoint. No deferred issue was closed.
 
 ---
 
@@ -95,8 +95,8 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 | **P2-03** | Researcher failures may be converted into missing output | ✅ **VERIFIED COMPLETE** |
 | **P2-04** | BRAIN result backfill failure is not a terminally modeled state | ✅ **VERIFIED COMPLETE** |
 | **P2-05** | Reproducibility is compromised by randomized synthetic seeds | ✅ **VERIFIED COMPLETE** |
-| **P2-06** | Composite score is hard-coded without calibrated justification | 🔍 **AUDITED — PENDING APPROVAL** |
-| **P2-07** | Automated repair logging & repair cycle detection | ⬜ Tracked |
+| **P2-06** | Composite score is hard-coded without calibrated justification | ✅ **VERIFIED COMPLETE LOCALLY — CHECKPOINT PENDING** |
+| **P2-07** | State transitions and concurrency need stronger guarantees | ✅ **AUDIT APPROVED — IMPLEMENTATION GATED ON P2-06 CHECKPOINT** |
 | **P2-08** | Multi-session concurrency & researcher pool isolation | ⬜ Tracked |
 | **P2-09** | Alpha expression normalization & semantic equivalence | ⬜ Tracked |
 | **P2-10** | Metric distribution outlier detection & data hygiene | ⬜ Tracked |
@@ -108,9 +108,9 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 
 ---
 
-## 4. Next Step: Review P2-06 Audit; Await Approval
+## 4. Next Step: Complete P2-06 Verification; Then Implement Approved P2-07
 
-P2-01 through P2-05 verification reports are recorded in `docs/remediation/reports/`; P2-05's final evidence is [`docs/remediation/reports/p2_05_final_verification_report.md`](docs/remediation/reports/p2_05_final_verification_report.md). P2-06's source-backed audit is [`docs/remediation/reports/p2_06_audit_report.md`](docs/remediation/reports/p2_06_audit_report.md). Present findings for review and await approval; do not implement P2-06 without approval.
+P2-01 through P2-05 verification reports are recorded in `docs/remediation/reports/`; P2-05's final evidence is [`docs/remediation/reports/p2_05_final_verification_report.md`](docs/remediation/reports/p2_05_final_verification_report.md). P2-06's audit is [`docs/remediation/reports/p2_06_audit_report.md`](docs/remediation/reports/p2_06_audit_report.md); its final local verification evidence is [`docs/remediation/reports/p2_06_final_verification_report.md`](docs/remediation/reports/p2_06_final_verification_report.md). All local verification gates passed. The exact intended changes still require a non-force checkpoint to `origin/main`; do not begin P2-07 until the resulting commit is confirmed remotely. P2-07's audit is approved for implementation; see [`docs/remediation/reports/p2_07_audit_report.md`](docs/remediation/reports/p2_07_audit_report.md).
 
 ### P2-05 Verification Summary
 P2-05 now derives versioned SHA-256 seeds from canonical configuration and unique persisted run identities, persists seed provenance, and routes output-affecting lab randomness through explicit local RNGs. Legacy records without matching provenance remain unknown; unseeded legacy tasks are not silently continued. Independent run 39449762941 passed 9 targeted P2-05 tests and all regression suites; the 362-test backend suite had zero failures/errors/skips and 25 existing async teardown warnings. Frontend tests/check/build succeeded. Full evidence and the documented provider-response persistence boundary are in `docs/remediation/reports/p2_05_final_verification_report.md`.

@@ -13,6 +13,7 @@ Exposes REST endpoints for the Self-Learning Multi-LLM Alpha Creation Engine:
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any
 
@@ -48,6 +49,26 @@ from ..schemas import Out
 from .deps import State, refuse
 
 log = structlog.get_logger(__name__)
+
+
+def _finite_score(value: float | None) -> float | None:
+    """Keep corrupt legacy values out of JSON while preserving their stored history."""
+    if value is None:
+        return None
+    numeric = float(value)
+    return numeric if math.isfinite(numeric) else None
+
+
+def _finite_json(value: Any) -> Any:
+    """Replace non-finite historical values before returning JSON-compatible payloads."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _finite_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_finite_json(item) for item in value]
+    return value
+
 
 router = APIRouter(prefix="/api/research", tags=["research"])
 
@@ -132,6 +153,12 @@ class CandidateOut(Out):
     oos_sharpe: float | None = None
     sharpe_decay: float | None = None
     composite_score: float | None = None
+    composite_score_spec: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Formula provenance for this score; null denotes a historical unversioned score."
+        ),
+    )
     is_submission_grade: bool | None = Field(
         default=False,
         description="Deprecated alias for internal quality thresholds; not BRAIN eligibility.",
@@ -170,6 +197,13 @@ class CandidateOut(Out):
     settings_verification_status: str | None = None
     candidate_provenance_hash: str | None = None
     created_at: datetime | None = None
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _quarantine_non_finite_metrics(cls, value: Any) -> Any:
+        if isinstance(value, int | float) and not math.isfinite(float(value)):
+            return None
+        return value
 
 
 class GenerationAttemptOut(Out):
@@ -555,7 +589,12 @@ async def list_candidates(
                     after_cost_sharpe=round(float(ac_sharpe), 2) if ac_sharpe is not None else None,
                     oos_sharpe=round(float(oos_s), 2) if oos_s is not None else None,
                     sharpe_decay=round(float(decay_s), 2) if decay_s is not None else None,
-                    composite_score=round(float(c_score), 3) if c_score is not None else None,
+                    composite_score=(
+                        round(_finite_score(c_score), 3)
+                        if _finite_score(c_score) is not None
+                        else None
+                    ),
+                    composite_score_spec=(ev.composite_score_spec if ev else None),
                     is_submission_grade=(
                         (ev.internal_checks is not None or ev.checks is None)
                         and (ev.checks_total or 0) > 0 and ev.checks_passed == ev.checks_total
@@ -785,7 +824,11 @@ async def list_evaluations(
                 "valReturns": round(float(ev.val_returns), 4) if ev.val_returns is not None else None,
                 "valDrawdown": round(float(ev.val_drawdown), 4) if ev.val_drawdown is not None else None,
                 "valAfterCostSharpe": round(float(ev.val_after_cost_sharpe), 4) if ev.val_after_cost_sharpe is not None else None,
-                "valCompositeScore": round(float(ev.val_composite_score), 4) if ev.val_composite_score is not None else None,
+                "valCompositeScore": (
+                    round(_finite_score(ev.val_composite_score), 4)
+                    if _finite_score(ev.val_composite_score) is not None
+                    else None
+                ),
                 "isValDecay": round(float(ev.is_val_decay), 4) if ev.is_val_decay is not None else None,
                 "oosSharpe": round(float(ev.oos_sharpe), 4) if ev.oos_sharpe is not None else None,
                 "oosFitness": round(float(ev.oos_fitness), 4) if ev.oos_fitness is not None else None,
@@ -795,7 +838,12 @@ async def list_evaluations(
                 "afterCostSharpe": round(float(ev.after_cost_sharpe), 4) if ev.after_cost_sharpe is not None else None,
                 "isOosGap": round(float(ev.is_oos_gap), 4) if ev.is_oos_gap is not None else None,
                 "sharpeDecay": round(float(ev.sharpe_decay), 4) if ev.sharpe_decay is not None else None,
-                "compositeScore": round(float(ev.composite_score), 4) if ev.composite_score is not None else None,
+                "compositeScore": (
+                    round(_finite_score(ev.composite_score), 4)
+                    if _finite_score(ev.composite_score) is not None
+                    else None
+                ),
+                "compositeScoreSpec": ev.composite_score_spec,
                 "holdoutSharpe": round(float(h_sharpe), 4) if h_sharpe is not None else None,
                 "holdoutFitness": round(float(h_fitness), 4) if h_fitness is not None else None,
                 "holdoutTurnover": round(float(h_turnover), 4) if h_turnover is not None else None,
@@ -819,7 +867,7 @@ async def list_evaluations(
                 "holdoutEvaluatedAt": ev.holdout_evaluated_at.isoformat() if ev.holdout_evaluated_at else None,
             }
         )
-    return results
+    return [_finite_json(item) for item in results]
 
 
 @router.post("/sessions/{session_id}/candidates/{candidate_id}/graduate")
@@ -961,6 +1009,7 @@ async def get_alpha_leaderboard(
             "modelLabel": r.model_label,
             "generation": r.generation,
             "compositeScore": r.composite_score,
+            "compositeScoreSpec": r.composite_score_spec,
             "fullSharpe": r.full_sharpe,
             "afterCostSharpe": r.after_cost_sharpe,
             "oosSharpe": r.oos_sharpe,

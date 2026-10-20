@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import statistics
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -60,6 +61,7 @@ class AlphaRankEntry:
     evaluation_scheme: str = "TWO_WAY_LEGACY"
     is_graduated: bool = False
     val_composite_score: float | None = None
+    composite_score_spec: dict[str, Any] | None = None
     val_sharpe: float | None = None
     val_after_cost_sharpe: float | None = None
     val_fitness: float | None = None
@@ -333,6 +335,11 @@ class LeaderboardService:
     ) -> list[AlphaRankEntry]:
         """Ranks individual alpha candidates by Composite Score descending."""
         async with self.db.session() as session:
+            score_order = func.coalesce(
+                ResearchEvaluation.val_composite_score,
+                ResearchEvaluation.composite_score,
+                0.0,
+            )
             stmt = (
                 select(
                     ResearchCandidate,
@@ -349,6 +356,8 @@ class LeaderboardService:
                 )
                 .where(
                     ResearchEvaluation.is_verified.is_(True),
+                    score_order >= -1.7976931348623157e308,
+                    score_order <= 1.7976931348623157e308,
                     ResearchCandidate.status.in_(
                         [
                             CandidateStatus.EVALUATED,
@@ -374,12 +383,8 @@ class LeaderboardService:
                 )
 
             stmt = stmt.order_by(
-                desc(
-                    func.coalesce(
-                        ResearchEvaluation.val_composite_score,
-                        ResearchEvaluation.composite_score,
-                    )
-                )
+                desc(score_order),
+                ResearchCandidate.id.asc(),
             ).limit(limit)
             res = await session.execute(stmt)
             rows = res.all()
@@ -392,6 +397,9 @@ class LeaderboardService:
                     if (is_3way and ev.val_composite_score is not None)
                     else (ev.composite_score or 0.0)
                 )
+                if not math.isfinite(float(comp_score)):
+                    log.warning("leaderboard.skip_non_finite_composite", candidate_id=cand.id)
+                    continue
                 after_cost = (
                     ev.val_after_cost_sharpe
                     if (is_3way and ev.val_after_cost_sharpe is not None)
@@ -417,8 +425,22 @@ class LeaderboardService:
                     if (is_3way and ev.val_fitness is not None)
                     else (ev.full_fitness or 0.0)
                 )
+                ranking_metrics = (
+                    comp_score,
+                    ev.full_sharpe or 0.0,
+                    after_cost,
+                    oos_s,
+                    decay,
+                    to_val,
+                    fit_val,
+                )
+                if any(not math.isfinite(float(value)) for value in ranking_metrics) or to_val < 0:
+                    log.warning("leaderboard.skip_invalid_metrics", candidate_id=cand.id)
+                    continue
                 # Final holdout metrics are revealed ONLY if candidate is graduated
                 h_sharpe = ev.holdout_sharpe if cand.status == CandidateStatus.GRADUATED else None
+                if h_sharpe is not None and not math.isfinite(float(h_sharpe)):
+                    h_sharpe = None
 
                 entries.append(
                     AlphaRankEntry(
@@ -446,6 +468,7 @@ class LeaderboardService:
                             if ev.val_composite_score is not None
                             else None
                         ),
+                        composite_score_spec=ev.composite_score_spec,
                         val_sharpe=round(float(ev.val_sharpe), 2) if ev.val_sharpe is not None else None,
                         val_after_cost_sharpe=(
                             round(float(ev.val_after_cost_sharpe), 2)
@@ -466,6 +489,8 @@ class LeaderboardService:
                     )
                 )
 
+            for rank, entry in enumerate(entries, start=1):
+                entry.rank = rank
             return entries
 
     async def get_researcher_leaderboard(

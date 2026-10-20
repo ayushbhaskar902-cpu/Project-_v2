@@ -41,6 +41,7 @@ class CuratedPoolMember:
     fitness: float
     turnover: float
     composite_score: float
+    composite_score_spec: dict[str, Any] | None = None
     weight: float = 0.0
 
 
@@ -96,8 +97,13 @@ class AlphaPoolOptimizer:
         if not candidate_ids:
             return []
 
-        # Sort candidate IDs by score descending
-        sorted_ids = sorted(candidate_ids, key=lambda cid: scores_dict.get(cid, 0.0), reverse=True)
+        for candidate_id in candidate_ids:
+            score = float(scores_dict.get(candidate_id, 0.0))
+            if not math.isfinite(score):
+                raise ValueError(f"Candidate {candidate_id} has a non-finite composite score")
+
+        # Stable score order; candidate ID breaks ties independently of input ordering.
+        sorted_ids = sorted(candidate_ids, key=lambda cid: (-float(scores_dict.get(cid, 0.0)), cid))
 
         selected: list[int] = [sorted_ids[0]]
         selected_pnls = [pnl_series_dict[sorted_ids[0]]]
@@ -181,8 +187,29 @@ class AlphaPoolOptimizer:
         target_size: int = 50,
     ) -> CuratedPoolResult:
         """Constructs an optimized low-correlation alpha pool with combination statistics."""
+        for candidate in candidates_data:
+            candidate_id = candidate.get("id")
+            for metric in ("composite_score", "sharpe", "fitness", "turnover"):
+                value = candidate.get(metric)
+                if value is not None and not math.isfinite(float(value)):
+                    raise ValueError(
+                        f"Candidate {candidate_id} has a non-finite {metric} metric"
+                    )
+            turnover = candidate.get("turnover")
+            if turnover is not None and float(turnover) < 0:
+                raise ValueError(f"Candidate {candidate_id} has negative turnover")
+
         c_ids = [c["id"] for c in candidates_data if c["id"] in pnl_series_map]
         scores = {c["id"]: float(c.get("composite_score", 0.0)) for c in candidates_data}
+        if any(not math.isfinite(score) for score in scores.values()):
+            raise ValueError("Portfolio candidate composite scores must all be finite")
+        for candidate_id in c_ids:
+            pnl = np.asarray(pnl_series_map[candidate_id], dtype=np.float64)
+            turnover = np.asarray(turnover_series_map.get(candidate_id, []), dtype=np.float64)
+            if not np.isfinite(pnl).all() or not np.isfinite(turnover).all():
+                raise ValueError(f"Candidate {candidate_id} has non-finite portfolio observations")
+            if np.any(turnover < 0):
+                raise ValueError(f"Candidate {candidate_id} has negative turnover observations")
 
         selected_ids = self.select_uncorrelated_pool(
             candidate_ids=c_ids,
@@ -207,6 +234,7 @@ class AlphaPoolOptimizer:
                     fitness=float(c.get("fitness", 0.0)),
                     turnover=float(c.get("turnover", 0.0)),
                     composite_score=float(c.get("composite_score", 0.0)),
+                    composite_score_spec=c.get("composite_score_spec"),
                     weight=equal_weight,
                 )
             )
