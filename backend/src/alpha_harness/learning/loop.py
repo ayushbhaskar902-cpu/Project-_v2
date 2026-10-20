@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import httpx
+import httpx2
 import structlog
 from sqlalchemy import func, select, update
 
@@ -546,8 +546,8 @@ class SelfLearningEngine:
                 BudgetExhaustedError,
                 LLMError,
                 ProviderError,
-                httpx.TimeoutException,
-                httpx.HTTPError,
+                httpx2.TimeoutException,
+                httpx2.HTTPError,
                 asyncio.TimeoutError,
                 json.JSONDecodeError,
                 CitationValidationError,

@@ -49,6 +49,9 @@ jobs:
           tests/test_p2_01_evaluation_jobs.py::test_p2_04_backfill_error_classification_and_sanitization
           tests/test_p2_01_evaluation_jobs.py::test_backfill_failures_retry_then_become_terminal
           tests/test_p2_01_evaluation_jobs.py::test_job_is_evaluable_only_after_verified_result_is_persisted
+          tests/test_p2_01_evaluation_jobs.py::test_p2_04_manual_requeue_preserves_persisted_failure_history
+          tests/test_p2_01_evaluation_jobs.py::test_p2_04_expired_worker_cannot_overwrite_newer_worker_outcome
+          tests/test_p2_04_backfill_failure_association.py
           -vv -ra --junitxml=../p2-04-targeted.xml 2>&1 | tee ../p2-04-targeted.log
 
       - name: P2-01 evaluation-job suite

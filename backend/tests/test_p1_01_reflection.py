@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-import httpx
+import httpx2
 import pytest
 from sqlalchemy import select, text
 
@@ -687,7 +687,7 @@ def test_llm_provider_timeout_triggers_labeled_fallback(tmp_path: Path):
                 s.add(ResearchEvaluation(candidate_id=c.id, is_verified=True, val_sharpe=1.5))
 
         mock_llm = AsyncMock()
-        mock_llm.generate = AsyncMock(side_effect=httpx.TimeoutException("API connection timed out"))
+        mock_llm.generate = AsyncMock(side_effect=httpx2.TimeoutException("API connection timed out"))
         engine = SelfLearningEngine(db=db, memory=ResearchMemory(db), llm=mock_llm)
 
         res = await engine.execute_learning_cycle(sess.id)

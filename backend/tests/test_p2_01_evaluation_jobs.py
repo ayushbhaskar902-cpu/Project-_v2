@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from alpha_harness.brain.errors import BrainDailyLimitReached, BrainRateLimited, BrainServiceUnavailable
 from alpha_harness.db.models import (
+    BackfillStatus,
     EvaluationJob,
     EvaluationJobStatus,
     ResearchCandidate,
@@ -167,7 +168,8 @@ def test_processing_requires_platform_and_verified_vault_evidence(tmp_path) -> N
 
 def test_backfill_failures_retry_then_become_terminal(tmp_path) -> None:
     async def run() -> None:
-        db = Database(tmp_path / "p2_01_retry.db")
+        db_path = tmp_path / "p2_01_retry.db"
+        db = Database(db_path)
         await db.create_all()
         try:
             async with db.session() as session:
@@ -190,10 +192,17 @@ def test_backfill_failures_retry_then_become_terminal(tmp_path) -> None:
                     raise RuntimeError("vault temporarily unavailable")
 
             now = [datetime(2026, 1, 1, tzinfo=UTC)]
-            service = EvaluationJobService(db, SimpleNamespace(vault=FailingVault()), clock=lambda: now[0])
-            job = await service.ensure_job(candidate_id)
             results = []
-            for delay in (0, 30, 60):
+            for attempt, delay in enumerate((0, 30, 60)):
+                if attempt:
+                    # A new service and database engine model a process restart between retries.
+                    await db.dispose()
+                    db = Database(db_path)
+                    await db.create_all()
+                service = EvaluationJobService(
+                    db, SimpleNamespace(vault=FailingVault()), clock=lambda: now[0]
+                )
+                job = await service.ensure_job(candidate_id)
                 now[0] += timedelta(seconds=delay)
                 results.append(await service.process_job(job.id))
             assert [result["retryCount"] for result in results] == [1, 2, 3]
@@ -201,6 +210,131 @@ def test_backfill_failures_retry_then_become_terminal(tmp_path) -> None:
             assert results[0]["status"] == EvaluationJobStatus.RESULT_BACKFILL
             assert results[0]["nextRetryAt"] is not None
             assert results[-1]["backfillStatus"] == "REVIEW_REQUIRED"
+        finally:
+            await db.dispose()
+
+    asyncio.run(run())
+
+
+def test_p2_04_manual_requeue_preserves_persisted_failure_history(tmp_path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "p2_04_manual_requeue.db")
+        await db.create_all()
+        try:
+            async with db.session() as session:
+                research_session = ResearchSession(name="P2-04", prompt="requeue")
+                session.add(research_session)
+                await session.flush()
+                candidate = _candidate(session_id=research_session.id, alpha_id="alpha-1")
+                session.add(candidate)
+                await session.flush()
+                job = EvaluationJob(
+                    candidate_id=candidate.id,
+                    session_id=research_session.id,
+                    alpha_id="alpha-1",
+                    status=EvaluationJobStatus.FAILED,
+                    backfill_status=BackfillStatus.REVIEW_REQUIRED,
+                    retry_count=3,
+                    backfill_attempt_count=3,
+                    backfill_error_class="TRANSIENT_ERROR",
+                    attempt_history=[{"attempt": 3, "classification": "TRANSIENT_ERROR"}],
+                )
+                session.add(job)
+                await session.flush()
+                job_id = job.id
+
+            service = EvaluationJobService(db, SimpleNamespace())
+            result = await service.manual_requeue(job_id, reason="operator reviewed")
+            assert result["status"] == EvaluationJobStatus.QUEUED
+            assert result["retryCount"] == 3
+            assert result["backfillAttemptCount"] == 3
+            assert result["manualRequeueCount"] == 1
+            assert result["attemptHistory"][0]["attempt"] == 3
+            assert result["attemptHistory"][1]["event"] == "manual_requeue"
+            async with db.session() as session:
+                persisted = await session.get(EvaluationJob, job_id)
+                assert persisted is not None
+                assert persisted.backfill_status == BackfillStatus.PENDING
+                assert len(persisted.attempt_history) == 2
+        finally:
+            await db.dispose()
+
+    asyncio.run(run())
+
+
+def test_p2_04_expired_worker_cannot_overwrite_newer_worker_outcome(tmp_path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "p2_04_stale_worker.db")
+        await db.create_all()
+        try:
+            async with db.session() as session:
+                research_session = ResearchSession(name="P2-04", prompt="stale worker")
+                session.add(research_session)
+                await session.flush()
+                simulation = _simulation(status=SimStatus.COMPLETE)
+                session.add(simulation)
+                await session.flush()
+                candidate = _candidate(
+                    session_id=research_session.id,
+                    simulation_record_id=simulation.id,
+                    alpha_id="alpha-1",
+                )
+                session.add(candidate)
+                await session.flush()
+                candidate_id = candidate.id
+
+            now = [datetime(2026, 1, 1, tzinfo=UTC)]
+            first_worker_started = asyncio.Event()
+            release_first_worker = asyncio.Event()
+
+            class GatedVault:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                async def load_verified_series(self, _alpha_id: str):
+                    self.calls += 1
+                    if self.calls == 1:
+                        first_worker_started.set()
+                        await release_first_worker.wait()
+                    return (["2026-01-01"] * 60, [0.01] * 60, [0.1] * 60)
+
+            class PersistingEvaluation:
+                def __init__(self, vault: GatedVault) -> None:
+                    self.vault = vault
+                    self.calls = 0
+
+                async def evaluate_candidate(self, *, candidate_id: int, cost_bps: float) -> None:
+                    del cost_bps
+                    self.calls += 1
+                    async with db.session() as session:
+                        session.add(ResearchEvaluation(
+                            candidate_id=candidate_id,
+                            is_verified=True,
+                            provenance="BRAIN_VAULT",
+                        ))
+
+            vault = GatedVault()
+            evaluation = PersistingEvaluation(vault)
+            first_service = EvaluationJobService(db, evaluation, clock=lambda: now[0])
+            second_service = EvaluationJobService(db, evaluation, clock=lambda: now[0])
+            job = await first_service.ensure_job(candidate_id)
+            first_task = asyncio.create_task(first_service.process_job(job.id))
+            await first_worker_started.wait()
+
+            now[0] += timedelta(minutes=6)
+            newer_result = await second_service.process_job(job.id)
+            release_first_worker.set()
+            stale_result = await first_task
+
+            assert newer_result["status"] == EvaluationJobStatus.EVALUATED
+            assert stale_result["status"] == EvaluationJobStatus.EVALUATED
+            assert vault.calls == 2
+            assert evaluation.calls == 1
+            async with db.session() as session:
+                persisted = await session.get(EvaluationJob, job.id)
+                assert persisted is not None
+                assert persisted.backfill_status == BackfillStatus.COMPLETE
+                assert persisted.backfill_attempt_count == 2
         finally:
             await db.dispose()
 
