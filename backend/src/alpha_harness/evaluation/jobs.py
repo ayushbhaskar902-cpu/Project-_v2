@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -12,9 +12,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from ..db.models import (
+    BackfillStatus,
     EvaluationJob,
     EvaluationJobStatus,
-    BackfillStatus,
     ResearchCandidate,
     ResearchEvaluation,
     SimulationRecord,
@@ -58,7 +58,7 @@ def _safe_error(exc: BaseException) -> str:
         r"(authorization|cookie|token|password|api[_ -]?key)\s*[:=]\s*[^,; ]+",
         r"\1=<redacted>",
         str(exc),
-        flags=re.I,
+        flags=re.IGNORECASE,
     )
     return value[:500]
 
@@ -251,6 +251,8 @@ class EvaluationJobService:
                     alpha_id,
                     job_id,
                     job.simulation_attempt,
+                    job.backfill_attempt_count,
+                    worker_token,
                     self._record_background_backfill_failure,
                 )
             if (
@@ -275,7 +277,7 @@ class EvaluationJobService:
             return await self._record_backfill_failure(job_id, worker_token, exc)
         finally:
             if self.backfill is not None and hasattr(self.backfill, "unregister_evaluation_job"):
-                self.backfill.unregister_evaluation_job(alpha_id)
+                self.backfill.unregister_evaluation_job(alpha_id, worker_token)
 
         async with self.db.session() as session:
             job = await session.get(EvaluationJob, job_id, with_for_update=True)
@@ -342,7 +344,13 @@ class EvaluationJobService:
             job.backfill_lease_until = None
 
     async def _record_background_backfill_failure(
-        self, job_id: int, simulation_attempt: int, alpha_id: str, exc: BaseException
+        self,
+        job_id: int,
+        simulation_attempt: int,
+        alpha_id: str,
+        backfill_attempt: int,
+        worker_token: str,
+        exc: BaseException,
     ) -> None:
         """Persist a failure reported by Backfill._fetch_each when job context exists."""
         async with self.db.session() as session:
@@ -351,7 +359,13 @@ class EvaluationJobService:
                 job is None
                 or job.simulation_attempt != simulation_attempt
                 or job.alpha_id != alpha_id
-                or job.status in (EvaluationJobStatus.EVALUATED, EvaluationJobStatus.FAILED)
+                or job.backfill_attempt_count != backfill_attempt
+                or job.status != EvaluationJobStatus.RESULT_BACKFILL
+                or job.backfill_worker_token not in (None, worker_token)
+                or (
+                    job.backfill_worker_token is None
+                    and job.backfill_status != BackfillStatus.PENDING
+                )
             ):
                 return
             classification, retryable, provider_after = _classify_backfill_error(exc)
