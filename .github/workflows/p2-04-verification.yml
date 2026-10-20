@@ -58,7 +58,7 @@ jobs:
             tests/test_p2_01_evaluation_jobs.py::test_p2_04_expired_worker_cannot_overwrite_newer_worker_outcome \
             tests/test_p2_01_evaluation_jobs.py::test_p2_04_database_commit_failure_cannot_mark_job_evaluable \
             tests/test_p2_04_backfill_failure_association.py \
-          -vv -ra --junitxml=../p2-04-targeted.xml 2>&1 | tee ../p2-04-targeted.log
+            -vv -ra --junitxml=../p2-04-targeted.xml 2>&1 | tee ../p2-04-targeted.log
           result=$?
           echo "exit_code=$result" >> "$GITHUB_OUTPUT"
           echo "::notice title=P2-04 test exit code::$result"
