@@ -113,5 +113,5 @@ P2-03 is verified complete. All existing deferred items, including `DEFERRED-TES
 
 ## P2-04 Verification Note
 
-P2-04 remains unverified. The independent GitHub-hosted Python 3.14 run passed 350 backend tests with 31 async teardown warnings; frontend checks reproduce failures at the base commit. Focused database-failure and persisted background-callback regressions were added afterward and still require a passing runner result. Direct local Python probes continue to show the host runtime stalls in `socket.socketpair()` before project code. No deferred technical-debt entry was removed or reclassified; `DEFERRED-TEST-01` remains intact.
+P2-04 remains unverified. The independent GitHub-hosted Python 3.14 run passed 352 backend tests with 31 async teardown warnings, including background failure association, restart scheduling, manual requeue, stale-worker and database-commit-failure coverage. Frontend check/build failures reproduce at the base commit and remain an acceptance gap. Direct local Python probes continue to show the host runtime stalls in `socket.socketpair()` before project code. No deferred technical-debt entry was removed or reclassified; `DEFERRED-TEST-01` remains intact.
 

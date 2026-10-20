@@ -114,12 +114,22 @@ jobs:
         id: frontend_check
         continue-on-error: true
         working-directory: frontend
-        run: pnpm check
+        run: |
+          set +e
+          pnpm check
+          result=$?
+          echo "::notice title=Frontend command exit code::pnpm check exited $result"
+          exit "$result"
       - name: Frontend build
         id: frontend_build
         continue-on-error: true
         working-directory: frontend
-        run: pnpm build
+        run: |
+          set +e
+          pnpm build
+          result=$?
+          echo "::notice title=Frontend command exit code::pnpm build exited $result"
+          exit "$result"
 
       - name: Publish test result files
         if: always()
@@ -212,12 +222,22 @@ jobs:
         id: baseline_check
         continue-on-error: true
         working-directory: frontend
-        run: pnpm check
+        run: |
+          set +e
+          pnpm check
+          result=$?
+          echo "::notice title=Baseline command exit code::pnpm check exited $result"
+          exit "$result"
       - name: Baseline frontend build
         id: baseline_build
         continue-on-error: true
         working-directory: frontend
-        run: pnpm build
+        run: |
+          set +e
+          pnpm build
+          result=$?
+          echo "::notice title=Baseline command exit code::pnpm build exited $result"
+          exit "$result"
       - name: Report baseline frontend outcomes
         if: always()
         env:
