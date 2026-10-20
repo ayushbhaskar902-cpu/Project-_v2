@@ -227,7 +227,7 @@
 **Fix:** Preserve the verified real-BRAIN robustness boundary and correct the stale documentation. Use versioned SHA-256 derivation over a unique persisted run identity and canonical configuration, persist the effective seed/version/config, and use explicit local RNGs for output-affecting laboratory randomness. Do not silently run legacy experiments that lack reproducibility metadata.
 **Acceptance tests:** Same identity/config/seed reproduces across fresh processes and `PYTHONHASHSEED` values; distinct identities/configurations produce distinct derived seeds; metadata is persisted and surfaced; lab generators and retries reuse explicit seeds; historical records without metadata remain marked unknown; synthetic robustness rows remain excluded from genuine evidence.
 
-**Verification:** **VERIFIED COMPLETE** on independent GitHub Actions run [39449227064](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39449227064), checkpoint `70e0bea9804457d81554ad7390ce34c378d50971`: P2-05 9/9, P2-04 9/9, P2-01 9/9, P0 60/60, P1 269/269, P2-02 5/5, P2-03 7/7, full backend 362/362; all zero failures/errors/skips. Frontend tests/check/build succeeded; `pnpm check` and `pnpm build` exited 0. Twenty-five full-suite async teardown warnings remain tracked under `DEFERRED-TEST-01`. Evidence: `docs/remediation/reports/p2_05_final_verification_report.md`.
+**Verification:** **VERIFIED COMPLETE** on independent GitHub Actions run [39449762941](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39449762941), checkpoint `4e3fce62c3d57f0fb49d093203e177ae610f0d6d`: P2-05 9/9, P2-04 9/9, P2-01 9/9, P0 60/60, P1 269/269, P2-02 5/5, P2-03 7/7, full backend 362/362; all zero failures/errors/skips. Frontend tests/check/build succeeded; `pnpm check` and `pnpm build` exited 0. Twenty-five full-suite async teardown warnings remain tracked under `DEFERRED-TEST-01`. Evidence: `docs/remediation/reports/p2_05_final_verification_report.md`.
 
 ### P2-06 — Composite score is hard-coded without calibrated justification
 
@@ -235,6 +235,8 @@
 **Problem:** A weighted formula ranks Sharpe, Fitness, decay and turnover using fixed weights. It may be a useful heuristic, but no calibration/ablation evidence is demonstrated.  
 **Fix:** Version the score definition, expose components separately, define weights in validated configuration, and benchmark it against predeclared portfolio objectives. Never hide hard thresholds in code. Report score version on every row.  
 **Acceptance tests:** Score can be reproduced from stored components and version; config validation prevents nonsensical weights; ablation results are documented.
+
+**Audit status:** **AUDITED — PENDING APPROVAL.** Source review confirms two hard-coded formulas, distinct missing-value defaults, the legacy zero-turnover fallback, no explicit finite-value validation in the score path, persisted scores without a dedicated formula-version field, and downstream ranking/selection use. Empirical invalidity or material ranking distortion is **not established**. See `docs/remediation/reports/p2_06_audit_report.md`. No implementation or weight change is authorized by this audit.
 
 ### P2-07 — State transitions and concurrency need stronger guarantees
 

@@ -115,3 +115,7 @@ P2-03 is verified complete. All existing deferred items, including `DEFERRED-TES
 
 P2-04 is verified complete on GitHub-hosted `ubuntu-latest` run [39440343617](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39440343617), source commit `7fd19e3d6343ed74a48d302b3bb918422b718c79`: all 353 backend tests, the focused 9-test P2-04 suite, the 9 frontend status tests, `pnpm check`, and `pnpm build` passed. The 39 full-suite async teardown warnings remain deferred under `DEFERRED-TEST-01`; no deferred item was removed or reclassified. The local Windows Python/asyncio startup issue remains environment-specific; independent-runner verification succeeded.
 
+## P2-05 Verification Note
+
+P2-05 is verified complete on GitHub Actions run [39449762941](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39449762941), checkpoint `4e3fce62c3d57f0fb49d093203e177ae610f0d6d`: 362 backend tests passed, including 9 focused P2-05 tests; no failures, errors, or skips. The complete run reported 25 existing async teardown warnings, retained under `DEFERRED-TEST-01`. All deferred issue entries remain open and unchanged; this verification closes none of them. The local Windows Python/asyncio startup issue remains environment-specific; independent-runner verification succeeded.
+

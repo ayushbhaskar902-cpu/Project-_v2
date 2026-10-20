@@ -4,11 +4,13 @@
 
 **Status:** VERIFIED COMPLETE on the independent runner
 
-**Verified checkpoint:** `70e0bea9804457d81554ad7390ce34c378d50971`
+**Verified checkpoint:** `4e3fce62c3d57f0fb49d093203e177ae610f0d6d`
 
 **Runner:** GitHub Actions `ubuntu-latest`, Python 3.14
 
-**Run:** [39449227064](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39449227064)
+**Run:** [39449762941](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39449762941)
+
+**Retained CI artifact:** `p2-04-p2-05-verification-results` (JUnit XML, per-suite logs, frontend logs, and `verification-summary.md`).
 
 ## Verification outcome
 
@@ -25,7 +27,7 @@ The independent workflow diagnosed and exercised Python 3.14 successfully (`asyn
 | P2-03 regression | 7 passed | 0 / 0 / 0 |
 | Complete backend suite | 362 passed | 0 / 0 / 0 |
 
-P0 reported 12 warnings, P1 reported 13, and the complete suite reported 25. These are existing SQLite/`aiosqlite` asynchronous teardown warnings tracked as `DEFERRED-TEST-01`; no test failed, errored, or was skipped. The targeted P2 suites reported no warnings in their published summaries.
+The isolated P0 run reported 12 warnings, isolated P1 reported 31 warnings, and the complete backend suite reported 25 warnings. These are existing SQLite/`aiosqlite` asynchronous teardown warnings tracked as `DEFERRED-TEST-01`; no test failed, errored, or was skipped. The targeted P2 suites reported no warnings in their published summaries. Warning totals vary between isolated and combined executions; use the full-suite figure for the complete run.
 
 Frontend component tests, `pnpm check`, and `pnpm build` all exited successfully. The workflow's public annotations record success and exit code 0 for checks/build; they do not publish a frontend test-case count. No frontend source changed in P2-05.
 

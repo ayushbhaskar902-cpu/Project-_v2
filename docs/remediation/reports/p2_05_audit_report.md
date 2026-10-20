@@ -39,4 +39,4 @@ The suspected integrity violation is **not substantiated in the inspected produc
 
 ## Scope boundary
 
-P2-05 is **VERIFIED COMPLETE** on checkpoint `70e0bea9804457d81554ad7390ce34c378d50971`; see [`p2_05_final_verification_report.md`](p2_05_final_verification_report.md) for the run URL, suite counts, warnings, and acceptance evidence. This audit does not authorize implementation of P2-06. P2-05 does not change the P2-04 backfill lifecycle, statistical methods, or holdout policy.
+P2-05 is **VERIFIED COMPLETE** on checkpoint `4e3fce62c3d57f0fb49d093203e177ae610f0d6d`; see [`p2_05_final_verification_report.md`](p2_05_final_verification_report.md) for the run URL, suite counts, warnings, and acceptance evidence. This audit does not authorize implementation of P2-06. P2-05 does not change the P2-04 backfill lifecycle, statistical methods, or holdout policy.
