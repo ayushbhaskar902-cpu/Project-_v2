@@ -1,6 +1,7 @@
 """P2-01 durable evaluation lifecycle and evidence-gated readiness tests."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -335,6 +336,63 @@ def test_p2_04_expired_worker_cannot_overwrite_newer_worker_outcome(tmp_path) ->
                 assert persisted is not None
                 assert persisted.backfill_status == BackfillStatus.COMPLETE
                 assert persisted.backfill_attempt_count == 2
+        finally:
+            await db.dispose()
+
+    asyncio.run(run())
+
+
+def test_p2_04_database_commit_failure_cannot_mark_job_evaluable(tmp_path) -> None:
+    async def run() -> None:
+        db = Database(tmp_path / "p2_04_database_failure.db")
+        await db.create_all()
+        try:
+            async with db.session() as session:
+                research_session = ResearchSession(name="P2-04", prompt="commit failure")
+                session.add(research_session)
+                await session.flush()
+                simulation = _simulation(status=SimStatus.COMPLETE)
+                session.add(simulation)
+                await session.flush()
+                candidate = _candidate(
+                    session_id=research_session.id,
+                    simulation_record_id=simulation.id,
+                    alpha_id="alpha-1",
+                )
+                session.add(candidate)
+                await session.flush()
+                candidate_id = candidate.id
+
+            class VerifiedVault:
+                async def load_verified_series(self, _alpha_id: str):
+                    return (["2026-01-01"] * 60, [0.01] * 60, [0.1] * 60)
+
+            service = EvaluationJobService(db, SimpleNamespace(vault=VerifiedVault()))
+            job = await service.ensure_job(candidate_id)
+            original_session = db.session
+            session_calls = 0
+
+            @asynccontextmanager
+            async def failing_commit():
+                nonlocal session_calls
+                session_calls += 1
+                async with original_session() as session:
+                    yield session
+                    if session_calls == 2:
+                        raise RuntimeError("simulated database commit failure")
+
+            db.session = failing_commit
+            with pytest.raises(RuntimeError, match="simulated database commit failure"):
+                await service.process_job(job.id)
+            db.session = original_session
+
+            async with db.session() as session:
+                persisted = await session.get(EvaluationJob, job.id)
+                assert persisted is not None
+                assert persisted.status == EvaluationJobStatus.RESULT_BACKFILL
+                assert persisted.backfill_status == BackfillStatus.IN_PROGRESS
+                assert persisted.backfill_worker_token is not None
+                assert persisted.result_evaluation_id is None
         finally:
             await db.dispose()
 

@@ -113,5 +113,5 @@ P2-03 is verified complete. All existing deferred items, including `DEFERRED-TES
 
 ## P2-04 Verification Note
 
-P2-04 remains unverified. The implementation now includes durable backfill worker association, retry telemetry, stale-worker tokens, and additive frontend lifecycle display, but the backend async regression suite and frontend checks have not completed in the current environment. Direct Python 3.14 probes show plain execution succeeds while both `asyncio.run()` and an explicitly created event loop stall before project code, confirming a host runtime/execution blocker. No deferred technical-debt entry was removed or reclassified.
+P2-04 remains unverified. The independent GitHub-hosted Python 3.14 run passed 350 backend tests with 31 async teardown warnings; frontend checks reproduce failures at the base commit. Focused database-failure and persisted background-callback regressions were added afterward and still require a passing runner result. Direct local Python probes continue to show the host runtime stalls in `socket.socketpair()` before project code. No deferred technical-debt entry was removed or reclassified; `DEFERRED-TEST-01` remains intact.
 

@@ -17,7 +17,7 @@
 
 ## Verification status
 
-The compatible installed Python 3.14.7 interpreter was found and project dependencies plus pytest were installed into it without changing `requires-python` or deleting the repository environment. The default UV interpreter discovery still fails because its sandboxed cache cannot be written. Verification remains incomplete because the managed Windows Python process cannot initialize an asyncio event loop in this environment: even `asyncio.run(asyncio.sleep(0))` stalls before project code executes. The Python 3.13 installation is not compatible with the declared `requires-python >=3.14` and has no project dependencies installed.
+The local Windows runtime remains blocked: UV cannot write its cache, and direct Python 3.14 probes stall in `socket.socketpair()` before application code. Independent verification now runs on a clean GitHub-hosted Ubuntu runner with Python 3.14. The environment diagnostic and frozen dependency installation passed. P2-04 remains **UNVERIFIED** because the full backend suite passes but frontend `check` and `build` fail on diagnostics also present at the base commit; final targeted database-failure regression additions are pending a new run.
 
 ### Isolated runtime evidence
 
@@ -35,7 +35,25 @@ The direct interpreter was `C:\Users\LENOVO\AppData\Local\Programs\Python\Python
 | `python -m compileall -q backend/src` | **passed, exit 0** |
 | `git diff --check` | **passed, exit 0** |
 
-The concurrent/stale-worker/database-failure and frontend-rendering acceptance tests still require a completed runtime test run. P2-04 remains **UNVERIFIED**. The frontend TypeScript build check also remains blocked by the existing project baseline: direct `tsc -b` returned exit 2 with pre-existing React Query export/type and unused-symbol errors; no frontend pass is claimed.
+### Independent GitHub Actions run
+
+Run [39436169099](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39436169099) at checkpoint `44d3df32e2f82712b29358f5369f51d03403897f` completed on `ubuntu-latest` in approximately 1m34s. Python 3.14 diagnostic, `uv sync --frozen`, frontend frozen install, and build workflow setup completed. Pytest `8.4.2` was added ephemerally with `uv run --with`; it was not added to project dependencies or the lockfile.
+
+| Suite | Result | Pytest time |
+|---|---:|---:|
+| Targeted P2-04 regressions | **6 passed; 0 failed/errors/skipped** | 1.74s |
+| P2-01 evaluation-job file | **8 passed; 0 failed/errors/skipped** | 0.85s |
+| P0 regression files | **60 passed; 0 failed/errors/skipped; 12 warnings** | 6.25s |
+| P1 regression files | **269 passed; 0 failed/errors/skipped; 22 warnings** | 11.56s |
+| P2-02 regression | **5 passed; 0 failed/errors/skipped** | 0.51s |
+| P2-03 regression | **7 passed; 0 failed/errors/skipped** | 1.81s |
+| Full backend suite | **350 passed; 0 failed/errors/skipped; 31 warnings** | 16.56s |
+
+The backend warnings include an `Event loop is closed` teardown diagnostic, consistent with the preserved `DEFERRED-TEST-01` async worker-thread cleanup issue. No test was skipped. The first independent run exposed an undeclared `httpx` import in `learning/loop.py`, although the frozen project supplies `httpx2`; the import and corresponding timeout test now use the locked `httpx2` package. The passing backend figures above include that compatibility fix.
+
+The frontend check and build both failed on the working branch. A comparison run at base commit `2be883eea92d92e946c68352fca5cb40651a1a83` failed both checks with the same existing unused imports, variables, and constants in `frontend/src/screens/research/index.tsx`. The working-tree diagnostics refer to those unchanged declarations; none point into the added P2-04 lifecycle rendering block. Thus these failures are confirmed baseline debt, while a successful frontend build is not established.
+
+The rerun now covers durable `_fetch_each()` association, retry classification and schedules across service/database restarts, artifact gating, manual requeue history, and an expired stale worker. A focused database-commit-failure regression and durable callback persistence regression have since been added and must pass on the next runner. Frontend state rendering has no component-level regression test, and frontend check/build remain failing on confirmed baseline unused-symbol diagnostics. P2-04 remains **UNVERIFIED**.
 
 No full backend suite result is claimed. The targeted and complete backend commands remain:
 
