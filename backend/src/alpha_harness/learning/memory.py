@@ -473,7 +473,11 @@ class ResearchMemory:
                         "sharpe_decay": v_decay,
                         "turnover": v_turnover,
                         "composite_score": v_composite,
-                        "is_submission_grade": ev.checks_passed == ev.checks_total and (ev.checks_total or 0) > 0,
+                        "is_submission_grade": (
+                            (ev.internal_checks is not None or ev.checks is None)
+                            and ev.checks_passed == ev.checks_total
+                            and (ev.checks_total or 0) > 0
+                        ),
                         # P1-10: observation metadata for SE and multiplicity
                         "t_years": t_years,
                     }
@@ -592,7 +596,11 @@ class ResearchMemory:
                         "sharpe_decay": v_decay,
                         "turnover": v_turnover,
                         "composite_score": v_composite,
-                        "is_submission_grade": ev.checks_passed == ev.checks_total and (ev.checks_total or 0) > 0,
+                        "is_submission_grade": (
+                            (ev.internal_checks is not None or ev.checks is None)
+                            and ev.checks_passed == ev.checks_total
+                            and (ev.checks_total or 0) > 0
+                        ),
                         "t_years": t_years,
                     }
                 )

@@ -19,7 +19,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import case, desc, func, select, update
+from sqlalchemy import case, desc, func, or_, select, update
 
 from ..db.models import (
     CandidateStatus,
@@ -32,6 +32,7 @@ from ..db.models import (
     ResearchResearcher,
     ResearchSession,
     ResearchStatus,
+    Submission,
     utcnow,
 )
 from ..evaluation import (
@@ -134,7 +135,12 @@ class CandidateOut(Out):
     oos_sharpe: float | None = None
     sharpe_decay: float | None = None
     composite_score: float | None = None
-    is_submission_grade: bool | None = False
+    is_submission_grade: bool | None = Field(
+        default=False,
+        description="Deprecated alias for internal quality thresholds; not BRAIN eligibility.",
+    )
+    platform_eligibility: str = Field(default="UNCHECKED", description="Authoritative BRAIN check state.")
+    is_submitted: bool = Field(default=False, description="True only when a Submission record exists.")
     alpha_id: str | None = None
     simulation_record_id: int | None = None
     prompt_strategy_id: int | None = None
@@ -244,7 +250,8 @@ async def list_sessions(state: State) -> list[SessionSummaryOut]:
                     func.sum(
                         case(
                             (
-                                ResearchEvaluation.checks_passed == ResearchEvaluation.checks_total,
+                                or_(ResearchEvaluation.internal_checks.is_not(None), ResearchEvaluation.checks.is_(None))
+                                & (ResearchEvaluation.checks_passed == ResearchEvaluation.checks_total),
                                 1,
                             ),
                             else_=0,
@@ -585,6 +592,9 @@ async def list_candidates(
         res = await session.execute(stmt)
         rows = res.all()
 
+        submitted_ids = set((await session.execute(
+            select(Submission.alpha_id).where(Submission.alpha_id.is_not(None))
+        )).scalars())
         results: list[CandidateOut] = []
         for cand, ev in rows:
             is_3way = ev is not None and ev.evaluation_scheme in ("THREE_WAY_CHRONOLOGICAL", "SPLIT_3WAY_FINAL")
@@ -636,7 +646,12 @@ async def list_candidates(
                     oos_sharpe=round(float(oos_s), 2) if oos_s is not None else None,
                     sharpe_decay=round(float(decay_s), 2) if decay_s is not None else None,
                     composite_score=round(float(c_score), 3) if c_score is not None else None,
-                    is_submission_grade=((ev.checks_total or 0) > 0 and ev.checks_passed == ev.checks_total) if (ev and ev.is_verified) else False,
+                    is_submission_grade=(
+                        (ev.internal_checks is not None or ev.checks is None)
+                        and (ev.checks_total or 0) > 0 and ev.checks_passed == ev.checks_total
+                    ) if (ev and ev.is_verified) else False,
+                    platform_eligibility=cand.platform_eligibility_status or "UNCHECKED",
+                    is_submitted=bool(cand.alpha_id and cand.alpha_id in submitted_ids),
                     alpha_id=cand.alpha_id,
                     simulation_record_id=cand.simulation_record_id,
                     prompt_strategy_id=cand.prompt_strategy_id,
@@ -807,6 +822,9 @@ async def evaluate_session_candidates(
                 "sharpeDecay": scorecard.sharpe_decay,
                 "compositeScore": scorecard.composite_score,
                 "isSubmissionGrade": scorecard.is_submission_grade,
+                "meetsInternalThresholds": scorecard.meets_internal_thresholds,
+                "platformEligibility": cand.platform_eligibility_status or "UNCHECKED",
+                "isSubmitted": False,
                 "checksPassed": scorecard.checks_passed,
                 "checksTotal": scorecard.checks_total,
                 "realBrainData": True,
@@ -867,6 +885,7 @@ async def list_evaluations(
         )
         if submission_grade_only:
             stmt = stmt.where(
+                or_(ResearchEvaluation.internal_checks.is_not(None), ResearchEvaluation.checks.is_(None)),
                 ResearchEvaluation.checks_passed == ResearchEvaluation.checks_total,
                 ResearchEvaluation.checks_total > 0,
             )
@@ -927,9 +946,18 @@ async def list_evaluations(
                 "holdoutDrawdown": round(float(h_drawdown), 4) if h_drawdown is not None else None,
                 "holdoutAfterCostSharpe": round(float(h_after_cost), 4) if h_after_cost is not None else None,
                 "checks": ev.checks,
+                "internalChecks": ev.internal_checks,
                 "checksPassed": ev.checks_passed,
                 "checksTotal": ev.checks_total,
-                "isSubmissionGrade": (ev.checks_passed == ev.checks_total and ev.checks_total > 0),
+                "isSubmissionGrade": (
+                    (ev.internal_checks is not None or ev.checks is None)
+                    and ev.checks_passed == ev.checks_total and ev.checks_total > 0
+                ),
+                "meetsInternalThresholds": (
+                    ev.internal_checks is not None or ev.checks is None
+                ) and ev.checks_passed == ev.checks_total and ev.checks_total > 0,
+                "platformEligibility": cand.platform_eligibility_status or "UNCHECKED",
+                "isSubmitted": False,
                 "evaluatedAt": ev.evaluated_at.isoformat() if ev.evaluated_at else None,
                 "holdoutEvaluatedAt": ev.holdout_evaluated_at.isoformat() if ev.holdout_evaluated_at else None,
             }

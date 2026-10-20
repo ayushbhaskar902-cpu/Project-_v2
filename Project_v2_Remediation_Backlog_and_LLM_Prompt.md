@@ -180,6 +180,8 @@
 **Fix:** Name and document internal status as `internal_candidate_pass` or similar. If available and authorized, run the applicable BRAIN-side checks and store their actual results separately. Keep validation, platform eligibility, and final user submission as distinct states.  
 **Acceptance tests:** UI/API distinguish internal threshold pass from verified platform status; no unsupported claims of guaranteed acceptance.
 
+**Verification:** COMPLETE ✅ — `docs/remediation/reports/p1_16_final_verification_report.md`.
+
 ## P2 — reliability, reproducibility, maintainability, operational correctness
 
 ### P2-01 — Frontend can evaluate before BRAIN simulations finish
@@ -188,6 +190,8 @@
 **Problem:** Workflow can enqueue simulations and immediately call evaluate; asynchronous BRAIN completion/backfill may not be ready.  
 **Fix:** Frontend subscribes/polls a persistent job state machine. Backend exposes explicit statuses such as `QUEUED`, `SUBMITTED`, `SIMULATING`, `RESULT_BACKFILL`, `EVALUABLE`, `EVALUATED`, `FAILED`. Trigger evaluation only when required artifacts are available. Do not depend on repeated manual clicks.  
 **Acceptance tests:** Simulated delayed BRAIN response completes without manual re-click; transient failures are recoverable; status transitions are tested.
+
+**Audit:** PENDING APPROVAL — `docs/remediation/reports/p2_01_audit_report.md`.
 
 ### P2-02 — API module contains too much business/research logic
 

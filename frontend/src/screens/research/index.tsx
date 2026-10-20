@@ -395,7 +395,7 @@ export function ResearchStudioScreen() {
         } else if (data.evaluatedCount > 0) {
           setPendingSimCount(null)
           toast.success(
-            `BRAIN Backtest Evaluation Complete: ${data.evaluatedCount} alphas (${data.submissionGradeCount} submissible)`,
+            `BRAIN Backtest Evaluation Complete: ${data.evaluatedCount} alphas (${data.submissionGradeCount} internal quality passes)`,
           )
         } else {
           toast.info('Evaluation Status', {
@@ -437,7 +437,7 @@ export function ResearchStudioScreen() {
           } else if (d.evaluatedCount > 0) {
             setPendingSimCount(null)
             toast.success(
-              `BRAIN Backtest Finished: ${d.evaluatedCount} alphas evaluated (${d.submissionGradeCount} submissible)`,
+              `BRAIN Backtest Finished: ${d.evaluatedCount} alphas evaluated (${d.submissionGradeCount} internal quality passes)`,
             )
             await loadSessionData(selectedSessionId)
             await loadSessions()
@@ -697,7 +697,7 @@ export function ResearchStudioScreen() {
           </Panel>
           <Panel className="p-3">
             <div className="text-[11px] font-medium text-ink-subtle uppercase tracking-wider">
-              Submission Grade
+              Internal Quality Pass
             </div>
             <div className="mt-1 text-headline font-bold text-pnl-positive-text">
               {currentSession.submissionGradeCandidates}
@@ -878,7 +878,7 @@ export function ResearchStudioScreen() {
                         tone={r.submissionGradeCount > 0 ? 'profit' : 'neutral'}
                         className="text-[10px]"
                       >
-                        {r.submissionGradeCount} Submissible
+                        {r.submissionGradeCount} Internal Passes
                       </Badge>
                     </div>
                     <div className="mt-1.5 text-body font-semibold text-ink">{r.label}</div>

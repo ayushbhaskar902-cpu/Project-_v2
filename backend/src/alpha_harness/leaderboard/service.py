@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 
 from ..db.models import (
     CandidateStatus,
@@ -368,6 +368,7 @@ class LeaderboardService:
                 )
             if submission_grade_only:
                 stmt = stmt.where(
+                    or_(ResearchEvaluation.internal_checks.is_not(None), ResearchEvaluation.checks.is_(None)),
                     ResearchEvaluation.checks_passed == ResearchEvaluation.checks_total,
                     ResearchEvaluation.checks_total > 0,
                 )
@@ -434,7 +435,10 @@ class LeaderboardService:
                         sharpe_decay=round(float(decay), 2),
                         turnover=round(float(to_val), 3),
                         fitness=round(float(fit_val), 2),
-                        is_submission_grade=bool(ev.checks_passed == ev.checks_total and (ev.checks_total or 0) > 0),
+                        is_submission_grade=bool(
+                            (ev.internal_checks is not None or ev.checks is None)
+                            and ev.checks_passed == ev.checks_total and (ev.checks_total or 0) > 0
+                        ),
                         evaluation_scheme=ev.evaluation_scheme or "TWO_WAY_LEGACY",
                         is_graduated=(cand.status == CandidateStatus.GRADUATED),
                         val_composite_score=(
@@ -715,7 +719,13 @@ class LeaderboardService:
                         valid_rate=fd["valid_rate"],
                         avg_sharpe=legacy_avg_sharpe,
                         best_sharpe=legacy_best_sharpe,
-                        submission_grade_count=fd["simulation_pass_count"],
+                        submission_grade_count=sum(
+                            1 for _, ev in cands_by_researcher[r.id]
+                            if ev is not None
+                            and (ev.internal_checks is not None or ev.checks is None)
+                            and ev.checks_passed == ev.checks_total
+                            and (ev.checks_total or 0) > 0
+                        ),
                         top_decile_rate=round(fd["simulation_pass_count"] / fd["total_generated"], 2) if fd["total_generated"] else 0.0,
                         # P1-11 Fair Benchmarking fields
                         status=status,

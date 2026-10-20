@@ -31,6 +31,8 @@ from ..db.models import (
     ResearchEvaluation,
     ResearchResearcher,
     ResearchSession,
+    PlatformEligibilityStatus,
+    Submission,
     utcnow,
 )
 from ..vault.metrics import BOOK, YEAR, after_cost, after_cost_sharpe, stats
@@ -108,7 +110,12 @@ class EvaluationScorecard:
     checks: dict[str, bool] = field(default_factory=dict)
     checks_passed: int = 0
     checks_total: int = 0
-    is_submission_grade: bool = False
+    meets_internal_thresholds: bool = False
+
+    @property
+    def is_submission_grade(self) -> bool:
+        """Deprecated compatibility alias; this is not BRAIN eligibility."""
+        return self.meets_internal_thresholds
 
     # Exact quantitative evaluation parameters & dates
     cost_bps: float = 5.0
@@ -269,7 +276,7 @@ def evaluate_pnl_series(
         scorecard.checks = checks
         scorecard.checks_passed = passed
         scorecard.checks_total = len(checks)
-        scorecard.is_submission_grade = passed == len(checks)
+        scorecard.meets_internal_thresholds = passed == len(checks)
         return scorecard
 
     # 2. Strict 3-Way Partitioning Mode
@@ -383,7 +390,7 @@ def evaluate_pnl_series(
     scorecard.checks = checks
     scorecard.checks_passed = passed
     scorecard.checks_total = len(checks)
-    scorecard.is_submission_grade = passed == len(checks)
+    scorecard.meets_internal_thresholds = passed == len(checks)
 
     return scorecard
 
@@ -430,17 +437,7 @@ def build_canonical_spec(
         "expression": candidate.expression,
         "language": candidate.language or "FASTEXPR",
         "methodology_version": "P0-03-V1",
-        "sim_settings": {
-            "decay": candidate.sim_decay,
-            "delay": candidate.sim_delay,
-            "nan_handling": "OFF",
-            "neutralization": candidate.sim_neutralization or "INDUSTRY",
-            "pasteurization": "ON",
-            "region": candidate.sim_region or "USA",
-            "truncation": 0.08,
-            "unit_handling": "VERIFY",
-            "universe": candidate.sim_universe or "TOP3000",
-        },
+        "sim_settings": candidate.effective_simulation_settings(),
         "total_observations": len(dates),
     }
 
@@ -544,7 +541,7 @@ class EvaluationEngine:
                     is_oos_gap=scorecard.is_oos_gap,
                     sharpe_decay=scorecard.sharpe_decay,
                     composite_score=scorecard.composite_score,
-                    checks=scorecard.checks,
+                    internal_checks=scorecard.checks,
                     checks_passed=scorecard.checks_passed,
                     checks_total=scorecard.checks_total,
                     cost_bps=scorecard.cost_bps,
@@ -582,7 +579,7 @@ class EvaluationEngine:
                 existing_eval.is_oos_gap = scorecard.is_oos_gap
                 existing_eval.sharpe_decay = scorecard.sharpe_decay
                 existing_eval.composite_score = scorecard.composite_score
-                existing_eval.checks = scorecard.checks
+                existing_eval.internal_checks = scorecard.checks
                 existing_eval.checks_passed = scorecard.checks_passed
                 existing_eval.checks_total = scorecard.checks_total
                 existing_eval.cost_bps = scorecard.cost_bps
@@ -620,6 +617,44 @@ class EvaluationEngine:
             submission_grade=scorecard.is_submission_grade,
         )
         return scorecard
+
+    async def record_platform_eligibility(
+        self,
+        candidate_id: int,
+        platform_checks: dict[str, Any],
+        *,
+        offline: bool = False,
+    ) -> str:
+        """Persist an actual BRAIN check response without changing research quality.
+
+        ``offline`` is explicit test/offline evidence and is never reported as live
+        platform eligibility. Live eligibility additionally requires verified provenance
+        and complete, verified simulation settings.
+        """
+        async with self.db.session() as session:
+            cand = await session.get(ResearchCandidate, candidate_id)
+            ev = (await session.execute(
+                select(ResearchEvaluation).where(ResearchEvaluation.candidate_id == candidate_id)
+            )).scalar_one_or_none()
+            if cand is None or ev is None:
+                raise InsufficientDataError(f"Candidate {candidate_id} has no evaluation.")
+            if offline:
+                status = PlatformEligibilityStatus.EXEMPT_OFFLINE
+            elif not ev.is_verified or ev.provenance != "BRAIN_VAULT":
+                status = PlatformEligibilityStatus.INELIGIBLE
+            elif not cand.is_simulation_settings_complete:
+                status = PlatformEligibilityStatus.INELIGIBLE
+            else:
+                results = [str(v.get("result", v)).upper() for v in platform_checks.values() if isinstance(v, dict)]
+                status = (
+                    PlatformEligibilityStatus.ELIGIBLE
+                    if results and all(r in {"PASS", "WARNING"} for r in results)
+                    else PlatformEligibilityStatus.INELIGIBLE
+                )
+            cand.platform_eligibility_status = status
+            cand.platform_eligibility_checked_at = utcnow()
+            ev.checks = platform_checks
+            return status
 
     async def graduate_candidate(self, candidate_id: int) -> EvaluationScorecard:
         """Executes explicit, one-way final holdout evaluation for an eligible candidate.

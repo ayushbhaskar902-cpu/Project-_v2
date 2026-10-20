@@ -649,6 +649,16 @@ class CandidateStatus(StrEnum):
     GRADUATED = "GRADUATED"
 
 
+class PlatformEligibilityStatus(StrEnum):
+    """Evidence-backed BRAIN eligibility, independent of research quality."""
+
+    UNCHECKED = "UNCHECKED"
+    CHECK_PENDING = "CHECK_PENDING"
+    ELIGIBLE = "ELIGIBLE"
+    INELIGIBLE = "INELIGIBLE"
+    EXEMPT_OFFLINE = "EXEMPT_OFFLINE"
+
+
 class ResearchSession(Base):
     """One autonomous multi-LLM research campaign.
 
@@ -1078,6 +1088,12 @@ class ResearchCandidate(Base):
     status: Mapped[str | None] = mapped_column(
         String(16), default=CandidateStatus.DRAFT, server_default="DRAFT", index=True
     )
+    #: P1-16: never inferred from internal metrics or statistical acceptance.
+    platform_eligibility_status: Mapped[str] = mapped_column(
+        String(24), default=PlatformEligibilityStatus.UNCHECKED,
+        server_default=PlatformEligibilityStatus.UNCHECKED, index=True,
+    )
+    platform_eligibility_checked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
@@ -1135,8 +1151,10 @@ class ResearchEvaluation(Base):
     #:   0.4 * after_cost_sharpe + 0.3 * fitness + 0.2 * (1 - sharpe_decay) - 0.1 * turnover
     composite_score: Mapped[float | None] = mapped_column(Float)
 
-    #: BRAIN submission check results, if fetched.
+    #: BRAIN submission check results, if fetched from an authoritative platform response.
     checks: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    #: Internal validation thresholds. Legacy rows may have these in ``checks``.
+    internal_checks: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     checks_passed: Mapped[int | None] = mapped_column(Integer)
     checks_total: Mapped[int | None] = mapped_column(Integer)
 

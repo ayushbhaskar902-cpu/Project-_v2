@@ -3,7 +3,7 @@
 **Repository:** `https://github.com/ayushbhaskar902-cpu/Project-_v2.git`  
 **Target Branch:** `main`  
 **Current Date:** October 20, 2026  
-**Current Program State:** P0-01 through P0-05 and P1-01 through P1-15 are **VERIFIED COMPLETE** (325 backend tests passing). **P1-16 is AUDITED — PENDING APPROVAL** as the next implementation task.
+**Current Program State:** P0-01 through P0-05 and P1-01 through P1-16 are **VERIFIED COMPLETE** (329 backend tests passing). **P2-01 is AUDITED — PENDING APPROVAL** as the next implementation task.
 
 ---
 
@@ -89,8 +89,8 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 | **P1-13** | Prompt evolution paired non-inferiority tournament gate | ✅ **VERIFIED COMPLETE** |
 | **P1-14** | Diversity-aware candidate selection & skeleton deduplication | ✅ **VERIFIED COMPLETE** |
 | **P1-15** | Explicit, validated, persisted simulation settings | ✅ **VERIFIED COMPLETE** |
-| **P1-16** | “Submission grade” is an internal heuristic, not proof of final submitability | 🔍 **AUDITED — PENDING APPROVAL** (Next Implementation) |
-| **P2-01** | Frontend client state synchronization & WebSocket feeds | ⬜ Tracked |
+| **P1-16** | “Submission grade” is an internal heuristic, not proof of final submitability | ✅ **VERIFIED COMPLETE** |
+| **P2-01** | Frontend client state synchronization & WebSocket feeds | 🔍 **AUDITED — PENDING APPROVAL** (Next Implementation) |
 | **P2-02** | Simulation timeout & cancellation handling | ⬜ Tracked |
 | **P2-03** | SQLite write contention & connection pool lifecycle | ⬜ Tracked |
 | **P2-04** | Rate-limit handling & exponential backoff queueing | ⬜ Tracked |
@@ -108,12 +108,13 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 
 ---
 
-## 4. Next Implementation Step: P1-16
+## 4. Next Implementation Step: P2-01
 
-The audit for P1-16 has been completed and documented in [`docs/remediation/reports/p1_16_audit_report.md`](file:///c:/Users/LENOVO/Desktop/alpha-harness/docs/remediation/reports/p1_16_audit_report.md).
+P1-16 implementation and verification are complete. The next audit is documented in [`docs/remediation/reports/p2_01_audit_report.md`](docs/remediation/reports/p2_01_audit_report.md) and is pending user approval before implementation.
 
-### The Canonical Problem of P1-16
-Currently, the codebase conflates 5 distinct concepts into a boolean flag (`scorecard.is_submission_grade`):
+### P1-16 Verification Summary
+P1-16 now distinguishes internal quality thresholds, statistical/lifecycle acceptance, verified BRAIN eligibility, and actual submission evidence. The compatibility field `scorecard.is_submission_grade` is explicitly an internal-quality alias only.
+Previously, the codebase conflated 5 distinct concepts into a boolean flag (`scorecard.is_submission_grade`):
 1. **Internal Heuristic Thresholds**: Passing 5 sample checks (`val_sharpe >= 1.25`, `val_fitness >= 1.0`, etc.) sets `is_submission_grade = True`.
 2. **Lifecycle Status Mutation**: Setting `is_submission_grade = True` automatically transitions `candidate.status = CandidateStatus.ACCEPTED`.
 3. **Database Misattribution**: `EvaluationRecord.checks` (documented as BRAIN platform checks) is populated with internal Python metric checks.
