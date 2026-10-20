@@ -37,20 +37,20 @@ The direct interpreter was `C:\Users\LENOVO\AppData\Local\Programs\Python\Python
 
 ### Independent GitHub Actions run
 
-Run [39436941450](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39436941450) at checkpoint `82d6649feb45b83af66c061b1f0b0d665820e2f2` completed on `ubuntu-latest` in approximately 1m35s. Python 3.14 diagnostic, `uv sync --frozen`, and frontend frozen installation passed. Pytest `8.4.2` was added ephemerally with `uv run --with`; it was not added to project dependencies or the lockfile.
+Run [39437486303](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39437486303) at checkpoint `a25b7a15080e2324f54a4d808a7d01ccb9cba478` completed on `ubuntu-latest` in 1m22s (14:14:58–14:16:20 UTC). Python 3.14 diagnostic, `uv sync --frozen`, and frontend frozen installation passed. Pytest `8.4.2` was added ephemerally with `uv run --with`; it was not added to project dependencies or the lockfile. This checkpoint changes verification documentation and adds explicit frontend exit-code reporting; the application source and tests are the same as the previous run.
 
 | Suite | Result | Pytest time |
 |---|---:|---:|
-| Targeted P2-04 regressions | **8 passed; 0 failed/errors/skipped** | 2.54s |
-| P2-01 evaluation-job file | **9 passed; 0 failed/errors/skipped** | 0.96s |
-| P0 regression files | **60 passed; 0 failed/errors/skipped; 12 warnings** | 7.09s |
-| P1 regression files | **269 passed; 0 failed/errors/skipped; 33 warnings** | 11.72s |
-| P2-02 regression | **5 passed; 0 failed/errors/skipped** | 0.55s |
-| P2-03 regression | **7 passed; 0 failed/errors/skipped** | 1.84s |
-| Full backend suite | **352 passed; 0 failed/errors/skipped; 31 warnings** | 16.16s |
+| Targeted P2-04 regressions | **8 passed; 0 failed/errors/skipped** | See run [39437486303](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39437486303) annotations |
+| P2-01 evaluation-job file | **9 passed; 0 failed/errors/skipped** | 0.80s |
+| P0 regression files | **60 passed; 0 failed/errors/skipped; 13 warnings** | 5.75s |
+| P1 regression files | **269 passed; 0 failed/errors/skipped; 23 warnings** | 10.28s |
+| P2-02 regression | **5 passed; 0 failed/errors/skipped** | 0.49s |
+| P2-03 regression | **7 passed; 0 failed/errors/skipped** | 1.76s |
+| Full backend suite | **352 passed; 0 failed/errors/skipped; 36 warnings** | 14.90s |
 
 The backend warnings include an `Event loop is closed` teardown diagnostic, consistent with the preserved `DEFERRED-TEST-01` async worker-thread cleanup issue. No test was skipped. The first independent run exposed an undeclared `httpx` import in `learning/loop.py`, although the frozen project supplies `httpx2`; the import and corresponding timeout test now use the locked `httpx2` package. The passing backend figures above include that compatibility fix.
 
-The frontend check and build both failed on the working branch. A comparison run at base commit `2be883eea92d92e946c68352fca5cb40651a1a83` failed both checks with the same existing unused imports, variables, and constants in `frontend/src/screens/research/index.tsx`. The working-tree diagnostics refer to those unchanged declarations; none point into the added P2-04 lifecycle rendering block. Thus these failures are confirmed baseline debt, while a successful frontend build is not established.
+On run 39437486303, `pnpm check` returned **1** and `pnpm build` returned **1** on the working branch. The comparison job at base commit `2be883eea92d92e946c68352fca5cb40651a1a83` returned **1** for both commands as well, with the same existing unused imports, variables, and constants in `frontend/src/screens/research/index.tsx`. The working-tree diagnostics refer to those unchanged declarations; none point into the added P2-04 lifecycle rendering block. Thus these failures are confirmed baseline debt, while a successful frontend build is not established.
 
-The passing targeted tests cover durable `_fetch_each()` job association after database restart, retry classification/scheduling across service restarts, missing-artifact gating, explicit manual requeue history, expired-worker fencing, and a simulated commit failure that leaves the job blocked in `RESULT_BACKFILL`. P0/P1/P2-02/P2-03 and the full backend suite all passed. The overall workflow exited **1** because frontend `pnpm check` and `pnpm build` failed. The comparison workflow at the base commit also failed both commands with the same unused imports, variables, and constants in unchanged lines of `research/index.tsx`; the lifecycle-rendering changes received no diagnostics. The current UI still lacks a component-level state-rendering test. P2-04 remains **UNVERIFIED** because required frontend checks did not pass, even though the failures are confirmed at baseline.
+The passing targeted tests cover durable `_fetch_each()` job association after database restart, retry classification/scheduling across service restarts, missing-artifact gating, explicit manual requeue history, expired-worker fencing, and a simulated commit failure that leaves the job blocked in `RESULT_BACKFILL`. P0/P1/P2-02/P2-03 and the full backend suite all passed. Run 39437486303's aggregate workflow exited **1**: `pnpm check` and `pnpm build` each exited **1**, both on the working branch and at the clean base commit. The lifecycle-rendering changes received no diagnostics. The current UI still lacks a component-level state-rendering test. P2-04 remains **UNVERIFIED** because required frontend checks did not pass, even though the failures are confirmed at baseline.
