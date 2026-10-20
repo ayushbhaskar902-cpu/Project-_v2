@@ -120,3 +120,17 @@ Holdout mutation coverage proves invariance of score and formula provenance fiel
 The live `git ls-remote origin refs/heads/main` query in this replay failed with a DNS/thread-start error (`getaddrinfo() thread failed to start`). Local `HEAD` and the cached `origin/main` tracking ref both equal `b257246b1663ce7458b084d2cd85d73efb81742c`; the prior checkpoint report records the earlier successful remote confirmation. No commit or push was made during this replay. The review reports and tracking edits remain local and are not staged.
 
 **Replay decision:** The P2-06 functional requirements, tests, lock-matched backend suite, LF frontend checks, baseline-aware lint, and whitespace checks are independently reproduced as passing on the committed tree. No new P2-06 defect was identified. Historical score calibration/ablation and `DEFERRED-TEST-01` remain open. This replay did not independently query the live remote because of the network/DNS failure above; it does not alter or rewrite the existing pushed checkpoint.
+
+## Follow-up — exact frontend wrapper and final remote confirmation — 2026-10-20
+
+The temporary junction limitation above was resolved without changing project files. A fresh LF archive of commit `38eb046b0c7da1967690aa9c4e62d28113e78206` was created on D:, and `pnpm install --offline --frozen-lockfile` succeeded using the existing `D:\.pnpm-store\v11` cache (239 packages reused, 0 downloaded; pnpm 12.6.0). On that snapshot:
+
+| Exact command | Result | Exit |
+|---|---:|---:|
+| `pnpm check` | Biome checked 132 files with no fixes; `tsc -b` passed | 0 |
+| `pnpm test` | 9 passed, 0 failed/cancelled/skipped | 0 |
+| `pnpm build` | TypeScript build and Vite production build passed | 0 |
+
+This supersedes the earlier junction-only `pnpm check` limitation. The final read-only remote query returned `38eb046b0c7da1967690aa9c4e62d28113e78206`; local `HEAD` and `origin/main` matched it at that time. The prior documentation checkpoint was pushed normally. This follow-up changes only this report; no backend/frontend source, tests, lockfiles, or deferred issues changed. The earlier statement that no push was made refers to the verification replay before that documentation checkpoint and is superseded by this follow-up.
+
+**Final verification decision:** P2-06's implementation, focused behavioral tests, affected regressions, complete backend suite, repository-wide frontend check/tests/build, changed-line Ruff comparison, and whitespace checks pass on the committed source/test tree. P2-06 remains **VERIFIED COMPLETE — PUSHED** at the recorded checkpoint. The only open debt is the already-tracked asynchronous SQLite teardown warnings (`DEFERRED-TEST-01`) and separately deferred calibration/ablation/sensitivity/historical inventory/cross-cohort work. No P2-07 or P2-08 implementation was performed.
