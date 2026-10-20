@@ -49,13 +49,13 @@ jobs:
           tests/test_p2_01_evaluation_jobs.py::test_p2_04_backfill_error_classification_and_sanitization
           tests/test_p2_01_evaluation_jobs.py::test_backfill_failures_retry_then_become_terminal
           tests/test_p2_01_evaluation_jobs.py::test_job_is_evaluable_only_after_verified_result_is_persisted
-          -vv -ra --junitxml=../p2-04-targeted.xml
+          -vv -ra --junitxml=../p2-04-targeted.xml 2>&1 | tee ../p2-04-targeted.log
 
       - name: P2-01 evaluation-job suite
         id: p201
         continue-on-error: true
         working-directory: backend
-        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_01_evaluation_jobs.py -q -ra --junitxml=../p2-01.xml
+        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_01_evaluation_jobs.py -q -ra --junitxml=../p2-01.xml 2>&1 | tee ../p2-01.log
 
       - name: P0 regressions
         id: p0
@@ -63,7 +63,7 @@ jobs:
         working-directory: backend
         run: >-
           uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p0_*.py
-          -q -ra --junitxml=../p0.xml
+          -q -ra --junitxml=../p0.xml 2>&1 | tee ../p0.log
 
       - name: P1 regressions
         id: p1
@@ -71,7 +71,7 @@ jobs:
         working-directory: backend
         run: >-
           uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p1_*.py
-          -q -ra --junitxml=../p1.xml
+          -q -ra --junitxml=../p1.xml 2>&1 | tee ../p1.log
 
       - name: P2-02 regression
         id: p202
@@ -79,7 +79,7 @@ jobs:
         working-directory: backend
         run: >-
           uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_02_research_services.py
-          -q -ra --junitxml=../p2-02.xml
+          -q -ra --junitxml=../p2-02.xml 2>&1 | tee ../p2-02.log
 
       - name: P2-03 regression
         id: p203
@@ -87,13 +87,13 @@ jobs:
         working-directory: backend
         run: >-
           uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_03_researcher_attempts.py
-          -q -ra --junitxml=../p2-03.xml
+          -q -ra --junitxml=../p2-03.xml 2>&1 | tee ../p2-03.log
 
       - name: Complete backend suite
         id: backend
         continue-on-error: true
         working-directory: backend
-        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests --tb=short -q -ra --junitxml=../backend-full.xml
+        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests --tb=short -q -ra --junitxml=../backend-full.xml 2>&1 | tee ../backend-full.log
 
       - uses: pnpm/action-setup@v6
         with:
@@ -138,8 +138,49 @@ jobs:
           FRONTEND_CHECK: ${{ steps.frontend_check.outcome }}
           FRONTEND_BUILD: ${{ steps.frontend_build.outcome }}
         run: |
-          printf 'P2-04=%s P2-01=%s P0=%s P1=%s P2-02=%s P2-03=%s backend=%s frontend-check=%s frontend-build=%s\n' \
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import xml.etree.ElementTree as ET
+
+          lines = []
+          for report in sorted(pathlib.Path(".").glob("*.xml")):
+              root = ET.parse(report).getroot()
+              suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+              tests = sum(int(suite.get("tests", 0)) for suite in suites)
+              failures = sum(int(suite.get("failures", 0)) for suite in suites)
+              errors = sum(int(suite.get("errors", 0)) for suite in suites)
+              skipped = sum(int(suite.get("skipped", 0)) for suite in suites)
+              elapsed = sum(float(suite.get("time", 0)) for suite in suites)
+              log = report.with_suffix(".log")
+              log_lines = log.read_text(encoding="utf-8", errors="replace").splitlines() if log.exists() else []
+              pytest_summary = next(
+                  (line.strip() for line in reversed(log_lines)
+                   if re.search(r"\b(passed|failed|error|warning|skipped)\b", line)),
+                  "summary line unavailable",
+              )
+              message = (
+                  f"{report.name}: {tests} tests, {failures} failures, "
+                  f"{errors} errors, {skipped} skipped, {elapsed:.2f}s; {pytest_summary}"
+              )
+              print(f"::notice title=Test results::{message}")
+              lines.append(message)
+              for case in root.iter("testcase"):
+                  issue = case.find("failure")
+                  if issue is None:
+                      issue = case.find("error")
+                  if issue is not None:
+                      detail = (issue.get("message") or (issue.text or "")).replace("\n", " ")[:300]
+                      print(f"::error title=Failing test::{case.get('classname')}.{case.get('name')}: {detail}")
+          pathlib.Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(
+              "## Pytest results\n\n" + "\n".join(f"- {line}" for line in lines) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          printf 'Recorded outcomes: P2-04=%s P2-01=%s P0=%s P1=%s P2-02=%s P2-03=%s backend=%s frontend-check=%s frontend-build=%s\n' \
             "$P204" "$P201" "$P0" "$P1" "$P202" "$P203" "$BACKEND" "$FRONTEND_CHECK" "$FRONTEND_BUILD"
+          echo "::error title=Underlying verification outcomes::P2-04=$P204, P2-01=$P201, P0=$P0, P1=$P1, P2-02=$P202, P2-03=$P203, backend=$BACKEND, frontend-check=$FRONTEND_CHECK, frontend-build=$FRONTEND_BUILD"
           test "$P204" = success && test "$P201" = success && test "$P0" = success \
             && test "$P1" = success && test "$P202" = success && test "$P203" = success \
             && test "$BACKEND" = success && test "$FRONTEND_CHECK" = success && test "$FRONTEND_BUILD" = success
