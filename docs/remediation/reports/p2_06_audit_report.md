@@ -4,7 +4,7 @@
 
 **Canonical problem statement:** “A weighted formula ranks Sharpe, Fitness, decay and turnover using fixed weights. It may be a useful heuristic, but no calibration/ablation evidence is demonstrated.”
 
-**Audit status:** AUDITED — APPROVED FOR IMPLEMENTATION. Implementation verification is recorded separately in `p2_06_final_verification_report.md` (verified locally; checkpoint pending).
+**Audit status:** AUDITED — APPROVED FOR IMPLEMENTATION. Implementation verification is recorded separately in `p2_06_final_verification_report.md`; the verified implementation and reporting checkpoints are present in the local `main` history at `b257246b1663ce7458b084d2cd85d73efb81742c`.
 
 **Scope:** Source and backlog audit only. No P2-06 code, weights, schema, or runtime behavior were changed.
 

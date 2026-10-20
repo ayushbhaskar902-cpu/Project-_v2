@@ -2,13 +2,13 @@
 
 **Canonical issue:** Composite score is hard-coded without calibrated justification.
 
-**Status:** **VERIFIED COMPLETE — PUSHED AND REMOTE CONFIRMED.** The implementation checkpoint is `d6a18ced8dd9497b365d024b30686197ce803cdb`; the report/tracking synchronization checkpoint `d1b417fdf288dd4e568c898cbb9bce2900e1ba7e` is present on `origin/main`.
+**Status:** **VERIFIED COMPLETE — PUSHED AND REMOTE CONFIRMED.** The implementation checkpoint is `d6a18ced8dd9497b365d024b30686197ce803cdb`. `d1b417fdf288dd4e568c898cbb9bce2900e1ba7e` was the intermediate report checkpoint; final synchronization commit `b257246b1663ce7458b084d2cd85d73efb81742c` is the current `origin/main` verified at P2-07 startup.
 
 **Approval:** Approved for implementation on 2026-10-20. No approval to recalibrate weights was given or inferred.
 
-**Repository base:** `01a12ba16c4e82a5017027d53ab85b99077f435d`. Implementation checkpoint: `d6a18ced8dd9497b365d024b30686197ce803cdb`. The reporting checkpoint `d1b417fdf288dd4e568c898cbb9bce2900e1ba7e` was pushed normally (no force) and `git ls-remote` confirmed it exactly matches `origin/main`.
+**Repository base:** `01a12ba16c4e82a5017027d53ab85b99077f435d`. Implementation checkpoint: `d6a18ced8dd9497b365d024b30686197ce803cdb`. Intermediate reporting checkpoint: `d1b417fdf288dd4e568c898cbb9bce2900e1ba7e`. Final P2-06 synchronization checkpoint: `b257246b1663ce7458b084d2cd85d73efb81742c`; at P2-07 startup `HEAD`, `origin/main`, and `git ls-remote` all agreed on this hash.
 
-**Latest tested source/test snapshot:** base `01a12ba16c4e82a5017027d53ab85b99077f435d`, with local modifications. SHA-256 of the sorted path-and-file-hash manifest over every modified/untracked backend source, backend test, and frontend source file: `50d85f47b06f3844778d5108c7a6c5fe3da413f41192e573b15df58ac848fd36` (12 files). The source snapshot includes the final lint-only line wrap in researcher memory. `origin/main` was last refreshed at `01a12ba16c4e82a5017027d53ab85b99077f435d`; a final refresh is required before checkpointing.
+**Latest tested source/test snapshot:** base `01a12ba16c4e82a5017027d53ab85b99077f435d`. The 12-file working-tree manifest used for verification was `50d85f47b06f3844778d5108c7a6c5fe3da413f41192e573b15df58ac848fd36`. Git normalized CRLF working-tree files to LF in commit blobs; independently hashing the same 12 paths from `b257246b1663ce7458b084d2cd85d73efb81742c` yields `b622c514c3080b90227022569e9bdee0e20f555952ea67e95095a364ce8ff0b8`. Byte comparison confirms the differences are line-ending-only (`sameLF=True` for every affected file). The committed P2-06 source/tests have no semantic changes after the verified run.
 
 ## Changes implemented locally
 
@@ -91,4 +91,32 @@ The full backend suite was attempted once after a lint-only line-wrap correction
 
 Independent source/test review found and corrected two Ruff E501 findings on changed lines; no behavioral defect remains identified within P2-06. The behavioral tests exercise persistence reopen/migration, actual API endpoint payloads, downstream leaderboard and memory consumption, portfolio selection, and holdout mutation rather than relying only on formula helpers. Existing formula coefficients remain untouched. Deferred calibration, ablation, sensitivity analysis, historical-version inventory, and cross-cohort robustness remain open; `DEFERRED-TEST-01` and all other prior entries are preserved.
 
-**Verification decision:** P2-06 is **VERIFIED COMPLETE** on the exact manifest above. The implementation checkpoint `d6a18ced8dd9497b365d024b30686197ce803cdb` and reporting checkpoint `d1b417fdf288dd4e568c898cbb9bce2900e1ba7e` were pushed with a normal fast-forward update; immediately afterward local `HEAD` and `git ls-remote origin refs/heads/main` both returned `d1b417fdf288dd4e568c898cbb9bce2900e1ba7e`. The staged-file list contained only 17 intended P2-06 implementation, test, and tracking files; the pre-existing untracked `p2_07_audit_report.md` remains excluded. P2-07 implementation remains gated on this verified checkpoint and was not started.
+**Verification decision:** P2-06 is **VERIFIED COMPLETE**. Implementation checkpoint `d6a18ced8dd9497b365d024b30686197ce803cdb`, intermediate report checkpoint `d1b417fdf288dd4e568c898cbb9bce2900e1ba7e`, and final P2-06 documentation synchronization checkpoint `b257246b1663ce7458b084d2cd85d73efb81742c` are preserved as distinct successive commits; no history was rewritten. At P2-07 startup, local `HEAD`, fetched `origin/main`, and `git ls-remote origin refs/heads/main` all matched `b257246b1663ce7458b084d2cd85d73efb81742c`. The pre-existing untracked `p2_07_audit_report.md` is preserved. P2-07 was not started before this baseline confirmation.
+
+## Independent verification replay — 2026-10-20
+
+This replay was performed against the committed implementation/test tree at `b257246b1663ce7458b084d2cd85d73efb81742c`, based on `01a12ba16c4e82a5017027d53ab85b99077f435d`. The 12 source/test/frontend paths and committed-blob manifest are the ones recorded above (`b622c514c3080b90227022569e9bdee0e20f555952ea67e95095a364ce8ff0b8`). The pasted task's older source/test manifest `0c783f071fae6aba44728e8e3253060d3be7c6ed7297dc262bd0088845f7cea7` does not identify this later committed tree. No P2-06 source or test changes were present in the current worktree.
+
+The existing disposable backend environment uses Python 3.14.7. Its installed versions were compared with every package/version entry in `backend/uv.lock`: all 53 locked package names matched, with zero version mismatches. Pytest 8.4.2 and Ruff 0.16.8 were available. No Python requirement, lockfile, dependency, or project environment was changed.
+
+| Replay command/scope | Result | Exit |
+|---|---:|---:|
+| `python -m pytest tests/test_p2_06_composite_scores.py -q --tb=short --basetemp=D:\\codex-p2-06-focused-current` | 22 passed, 0 failed | 0 |
+| Affected P0/P1/P2 selection: P0-01, P0-03, P1-10, P1-11, P1-12, P1-14, P2-01, P2-05, P2-06 | 125 passed, 0 failed, 13 warnings | 0 |
+| `python -m pytest --tb=short -q --basetemp=D:\\codex-p2-06-full-current` | 384 passed, 0 failed, 37 warnings, 174.04s | 0 |
+| Repository-wide Biome CI on a clean LF archive: `node node_modules/@biomejs/biome/bin/biome ci .` | 132 files checked, no fixes, passed | 0 |
+| `node node_modules/typescript/bin/tsc -b` | passed (run before tests and again as build prerequisite) | 0 |
+| `node --test tests/*.test.mjs` | 9 passed, 0 failed/skipped | 0 |
+| `node node_modules/vite/bin/vite.js build` | production build passed | 0 |
+| Ruff 0.16.8 against all 8 modified backend source files, baseline compared with `01a12ba…` | 278 whole-file diagnostics; 0 on added/changed lines | 1 (pre-existing whole-file diagnostics) |
+| `git diff --check` | passed; only the documented LF/CRLF checkout notice | 0 |
+
+The affected regression selection was first attempted with pytest temp files on C:, where the volume had 0 free bytes. That attempt failed with SQLite “database or disk is full” setup errors and cascading test failures; it is not counted as product-defect evidence. Only the three exact uniquely named pytest temp directories created during this replay were removed. The same affected selection was rerun with temp files on D: and passed 125/125. The full suite also ran on D: and passed. Existing async SQLite connection/event-loop cleanup warnings remain open under `DEFERRED-TEST-01`; warning count differs by run.
+
+Frontend checks used the exact committed tree in an LF archive on D:, Node v26.10.0, pnpm 12.6.0, Biome 2.5.14, TypeScript 7.0.2, and Vite 8.3.0, with the repository's already-installed dependencies. `pnpm check` itself could not initialize through a temporary `node_modules` junction (“workspace hoist directory is not a real directory”). The underlying commands from that script—repository-wide `biome ci .` and `tsc -b`—were run directly and both passed. Frontend tests and production build also passed. No frontend source, package manifest, lockfile, or formatting configuration was changed.
+
+Holdout mutation coverage proves invariance of score and formula provenance fields returned by the candidate/evaluation APIs, leaderboard order, researcher-memory ordering, and pool selection. It does not assert that an entire post-graduation API object is byte-for-byte invariant: the API intentionally reports revealed holdout metrics for graduated candidates, so those fields should reflect a changed holdout value. The P2-06 invariant is that such values do not alter score computation, score provenance, or pre-graduation selection consumers.
+
+The live `git ls-remote origin refs/heads/main` query in this replay failed with a DNS/thread-start error (`getaddrinfo() thread failed to start`). Local `HEAD` and the cached `origin/main` tracking ref both equal `b257246b1663ce7458b084d2cd85d73efb81742c`; the prior checkpoint report records the earlier successful remote confirmation. No commit or push was made during this replay. The review reports and tracking edits remain local and are not staged.
+
+**Replay decision:** The P2-06 functional requirements, tests, lock-matched backend suite, LF frontend checks, baseline-aware lint, and whitespace checks are independently reproduced as passing on the committed tree. No new P2-06 defect was identified. Historical score calibration/ablation and `DEFERRED-TEST-01` remain open. This replay did not independently query the live remote because of the network/DNS failure above; it does not alter or rewrite the existing pushed checkpoint.
