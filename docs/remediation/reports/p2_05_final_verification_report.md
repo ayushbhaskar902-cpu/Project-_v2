@@ -4,11 +4,11 @@
 
 **Status:** VERIFIED COMPLETE on the independent runner
 
-**Source commit:** `0f9dc7f955eb832a34d1ac7a47da6a4163e2c463`
+**Verified checkpoint:** `70e0bea9804457d81554ad7390ce34c378d50971`
 
 **Runner:** GitHub Actions `ubuntu-latest`, Python 3.14
 
-**Run:** [39448158145](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39448158145)
+**Run:** [39449227064](https://github.com/ayushbhaskar902-cpu/Project-_v2/actions/runs/39449227064)
 
 ## Verification outcome
 
@@ -25,7 +25,7 @@ The independent workflow diagnosed and exercised Python 3.14 successfully (`asyn
 | P2-03 regression | 7 passed | 0 / 0 / 0 |
 | Complete backend suite | 362 passed | 0 / 0 / 0 |
 
-P0 reported 12 warnings, P1 reported 28, and the complete suite reported 40. The warnings are existing SQLite/`aiosqlite` asynchronous teardown diagnostics (`Event loop is closed`) tracked as `DEFERRED-TEST-01`; no test failed, errored, or was skipped. The targeted P2 suites reported no warnings in their published summaries.
+P0 reported 12 warnings, P1 reported 13, and the complete suite reported 25. These are existing SQLite/`aiosqlite` asynchronous teardown warnings tracked as `DEFERRED-TEST-01`; no test failed, errored, or was skipped. The targeted P2 suites reported no warnings in their published summaries.
 
 Frontend component tests, `pnpm check`, and `pnpm build` all exited successfully. The workflow's public annotations record success and exit code 0 for checks/build; they do not publish a frontend test-case count. No frontend source changed in P2-05.
 
@@ -47,4 +47,4 @@ No P2-05 acceptance criterion remains unverified by the implementation review an
 
 ## Checkpoint
 
-The verified implementation and workflow changes are on `wip/p2-05-reproducible-seeds` at the source commit above. This report and canonical status documents are updated after the successful run; the main-branch merge/checkpoint is recorded separately once completed.
+The verified implementation and workflow changes are on `wip/p2-05-reproducible-seeds` at the verified checkpoint above. This report and canonical status documents are updated after the successful run; the main-branch merge/checkpoint is recorded separately once completed.
