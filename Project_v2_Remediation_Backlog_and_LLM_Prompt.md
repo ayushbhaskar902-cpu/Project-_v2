@@ -218,6 +218,8 @@
 **Fix:** Track backfill status, attempts, last error, next retry and required artifact availability. Backoff on temporary errors; stop/review after a defined retry budget; never replace missing data with fabricated returns.  
 **Acceptance tests:** Backfill failure leaves candidate unevaluated; a later successful backfill resumes evaluation; terminal failure is visible and auditable.
 
+**Verification:** IMPLEMENTED — **UNVERIFIED** pending backend and frontend test-suite evidence in `docs/remediation/reports/p2_04_final_verification_report.md`.
+
 ### P2-05 — Reproducibility is compromised by randomized synthetic seeds
 
 **Area:** synthetic fallback/robustness code.  

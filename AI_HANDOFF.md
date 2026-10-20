@@ -3,7 +3,7 @@
 **Repository:** `https://github.com/ayushbhaskar902-cpu/Project-_v2.git`  
 **Target Branch:** `main`  
 **Current Date:** October 20, 2026  
-**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, and P2-01 through P2-03 are **VERIFIED COMPLETE**. The latest full backend suite passes **343 tests** with **21 existing async SQLite/SQLAlchemy teardown warnings**. P2-04 remains deferred and must not be implemented without approval.
+**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, and P2-01 through P2-03 are **VERIFIED COMPLETE**. P2-04 remains **UNVERIFIED**; its implementation now includes durable background failure association, worker tokens, and lifecycle UI, but async backend/frontend verification is incomplete. Do not begin P2-05 implementation without review approval.
 
 ---
 
@@ -93,8 +93,8 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 | **P2-01** | Frontend client state synchronization & WebSocket feeds | 🔍 **AUDITED — PENDING APPROVAL** (Next Implementation) |
 | **P2-02** | Simulation timeout & cancellation handling | ⬜ Tracked |
 | **P2-03** | Researcher failures may be converted into missing output | ✅ **VERIFIED COMPLETE** |
-| **P2-04** | Rate-limit handling & exponential backoff queueing | ⬜ Tracked |
-| **P2-05** | Cache invalidation on dataset/field catalog changes | ⬜ Tracked |
+| **P2-04** | BRAIN result backfill failure is not a terminally modeled state | 🔍 **IMPLEMENTED — UNVERIFIED** |
+| **P2-05** | Reproducibility is compromised by randomized synthetic seeds | 🔍 **AUDITED — PENDING APPROVAL** |
 | **P2-06** | Datafield search semantic indexing & ranking | ⬜ Tracked |
 | **P2-07** | Automated repair logging & repair cycle detection | ⬜ Tracked |
 | **P2-08** | Multi-session concurrency & researcher pool isolation | ⬜ Tracked |
@@ -108,9 +108,9 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 
 ---
 
-## 4. Next Implementation Step: P2-04
+## 4. Next Step: Resolve the P2-04 Runtime Blocker and Review P2-05
 
-P2-01 and P2-02 implementation work is documented in [`docs/remediation/reports/p2_01_final_verification_report.md`](docs/remediation/reports/p2_01_final_verification_report.md) and [`docs/remediation/reports/p2_02_final_verification_report.md`](docs/remediation/reports/p2_02_final_verification_report.md). P2-03 is verified in [`docs/remediation/reports/p2_03_final_verification_report.md`](docs/remediation/reports/p2_03_final_verification_report.md). The next artifact is the P2-04 audit report; do not implement P2-04 until the user approves it.
+P2-01 and P2-02 implementation work is documented in [`docs/remediation/reports/p2_01_final_verification_report.md`](docs/remediation/reports/p2_01_final_verification_report.md) and [`docs/remediation/reports/p2_02_final_verification_report.md`](docs/remediation/reports/p2_02_final_verification_report.md). P2-03 is verified in [`docs/remediation/reports/p2_03_final_verification_report.md`](docs/remediation/reports/p2_03_final_verification_report.md). P2-04 implementation is documented in [`docs/remediation/reports/p2_04_final_verification_report.md`](docs/remediation/reports/p2_04_final_verification_report.md), but remains unverified because the host Python runtime cannot initialize asyncio. The P2-05 audit is recorded in [`docs/remediation/reports/p2_05_audit_report.md`](docs/remediation/reports/p2_05_audit_report.md); review it only and do not implement P2-05 without approval.
 
 ### P2-03 Verification Summary
 P2-03 now creates a durable `RUNNING` `GenerationAttempt` before each researcher provider call, records terminal provider/validation/cancellation/orchestration outcomes, applies bounded transient retries, preserves successful siblings and candidate lineage, exposes additive partial-round status through the API/UI, and recovers stale attempts. Focused P2-03 tests: 4 passed. Relevant regression tests: 146 passed with 1 existing async warning. Full backend suite: 343 passed, 21 existing async teardown warnings, exit code 0.

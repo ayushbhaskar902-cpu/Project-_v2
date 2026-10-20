@@ -1233,6 +1233,17 @@ class EvaluationJobStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class BackfillStatus(StrEnum):
+    """Durable state of the genuine BRAIN result-artifact backfill."""
+
+    PENDING = "PENDING"
+    IN_PROGRESS = "IN_PROGRESS"
+    RETRY_SCHEDULED = "RETRY_SCHEDULED"
+    COMPLETE = "COMPLETE"
+    TERMINAL_FAILURE = "TERMINAL_FAILURE"
+    REVIEW_REQUIRED = "REVIEW_REQUIRED"
+
+
 class EvaluationJob(Base):
     """Durable, idempotent coordination record for post-simulation evaluation."""
 
@@ -1260,6 +1271,20 @@ class EvaluationJob(Base):
     retry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     max_retries: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: P2-04: backfill telemetry is separate from simulation/evaluation retries.
+    backfill_status: Mapped[str] = mapped_column(
+        String(24), default=BackfillStatus.PENDING, server_default=BackfillStatus.PENDING, index=True
+    )
+    backfill_attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    backfill_error_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    backfill_error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True, index=True)
+    required_artifacts: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    verified_artifacts: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    attempt_history: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    backfill_worker_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    backfill_lease_until: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    manual_requeue_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     result_evaluation_id: Mapped[int | None] = mapped_column(
         ForeignKey("research_evaluation.id", ondelete="SET NULL"), nullable=True
     )

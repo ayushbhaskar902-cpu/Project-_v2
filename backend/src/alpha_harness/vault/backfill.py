@@ -118,6 +118,11 @@ class Backfill:
         #: Alphas waiting for the next shared list read, each with what its caller awaits.
         self._landed: dict[str, asyncio.Future[None]] = {}
         self._drainer: asyncio.Task[None] | None = None
+        #: Evaluation jobs currently waiting on a background result fetch. The callback is
+        #: supplied by the durable coordinator; ordinary catalog backfills remain independent.
+        self._evaluation_jobs: dict[
+            str, tuple[int, int, Callable[[int, int, str, BaseException], Awaitable[None]]]
+        ] = {}
         #: How captures were read: from a shared list page, or one request each. If
         #: ``fetched`` rivals ``listed``, the list read is not saving anything.
         self.capture_counts = {"lists": 0, "listed": 0, "fetched": 0}
@@ -396,6 +401,19 @@ class Backfill:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
+    def register_evaluation_job(
+        self,
+        alpha_id: str,
+        job_id: int,
+        simulation_attempt: int,
+        on_failure: Callable[[int, int, str, BaseException], Awaitable[None]],
+    ) -> None:
+        """Associate a background fetch with its durable evaluation coordinator."""
+        self._evaluation_jobs[alpha_id] = (job_id, simulation_attempt, on_failure)
+
+    def unregister_evaluation_job(self, alpha_id: str) -> None:
+        self._evaluation_jobs.pop(alpha_id, None)
+
     async def _fetch_each(self, alpha_ids: list[str]) -> None:
         for alpha_id in alpha_ids:
             try:
@@ -403,6 +421,20 @@ class Backfill:
             # One alpha's series failing must not abandon the rest.
             except Exception as exc:  # noqa: BLE001
                 log.warning("vault.returns_failed", alpha_id=alpha_id, error=str(exc)[:160])
+                context = self._evaluation_jobs.pop(alpha_id, None)
+                if context is not None:
+                    job_id, simulation_attempt, reporter = context
+                    try:
+                        await reporter(job_id, simulation_attempt, alpha_id, exc)
+                    except Exception as report_exc:  # noqa: BLE001
+                        log.error(
+                            "vault.returns_failure_report_failed",
+                            alpha_id=alpha_id,
+                            job_id=job_id,
+                            error=str(report_exc)[:160],
+                        )
+            else:
+                self._evaluation_jobs.pop(alpha_id, None)
 
     async def capture(self, alpha_id: str) -> None:
         """Record one alpha as soon as its simulation finishes. Returns once it is stored.

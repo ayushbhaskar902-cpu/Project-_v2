@@ -111,3 +111,7 @@ This log persistently tracks non-blocking enhancements, advanced statistical est
 
 P2-03 is verified complete. All existing deferred items, including `DEFERRED-TEST-01`, remain preserved. Provider-specific cost pricing, richer request-ID extraction, and percentile latency dashboards remain non-blocking follow-up work because provider telemetry contracts are not uniform.
 
+## P2-04 Verification Note
+
+P2-04 remains unverified. The implementation now includes durable backfill worker association, retry telemetry, stale-worker tokens, and additive frontend lifecycle display, but the backend async regression suite and frontend checks have not completed in the current environment. Direct Python 3.14 probes show plain execution succeeds while both `asyncio.run()` and an explicitly created event loop stall before project code, confirming a host runtime/execution blocker. No deferred technical-debt entry was removed or reclassified.
+

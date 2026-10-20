@@ -1,0 +1,84 @@
+name: P2-04 verification
+
+on:
+  push:
+    branches: [wip/p2-04-verification]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Diagnose Python and asyncio runtime
+        run: |
+          python --version
+          python - <<'PY'
+          import asyncio
+          import socket
+          import sys
+
+          print(f"executable={sys.executable}", flush=True)
+          asyncio.run(asyncio.sleep(0))
+          print("asyncio.run passed", flush=True)
+          left, right = socket.socketpair()
+          left.close()
+          right.close()
+          print("socket.socketpair passed", flush=True)
+          PY
+
+      - name: Install locked backend dependencies
+        run: uv sync --frozen --directory backend
+
+      - name: Target P2-04 backfill regressions
+        working-directory: backend
+        run: >-
+          uv run --frozen --with pytest==8.4.2 python -m pytest
+          tests/test_p2_01_evaluation_jobs.py::test_p2_04_backfill_error_classification_and_sanitization
+          tests/test_p2_01_evaluation_jobs.py::test_backfill_failures_retry_then_become_terminal
+          tests/test_p2_01_evaluation_jobs.py::test_job_is_evaluable_only_after_verified_result_is_persisted
+          -vv -ra
+
+      - name: P2-01 evaluation-job suite
+        working-directory: backend
+        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_01_evaluation_jobs.py -q -ra
+
+      - name: P0 P1 P2-02 and P2-03 regressions
+        working-directory: backend
+        run: >-
+          uv run --frozen --with pytest==8.4.2 python -m pytest
+          tests/test_p0_*.py tests/test_p1_*.py
+          tests/test_p2_02_research_services.py tests/test_p2_03_researcher_attempts.py
+          -q -ra
+
+      - name: Complete backend suite
+        working-directory: backend
+        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests --tb=short -q -ra
+
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: frontend/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.node-version
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Frontend checks
+        working-directory: frontend
+        run: pnpm check
+      - name: Frontend build
+        working-directory: frontend
+        run: pnpm build

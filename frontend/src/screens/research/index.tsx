@@ -215,6 +215,14 @@ interface EvaluationJob {
   retryCount: number
   maxRetries: number
   lastError: string | null
+  backfillStatus: string
+  backfillAttemptCount: number
+  backfillErrorClass: string | null
+  backfillErrorDetail: string | null
+  nextRetryAt: string | null
+  requiredArtifacts: Record<string, boolean> | null
+  verifiedArtifacts: Record<string, unknown> | null
+  attemptHistory: Array<Record<string, unknown>>
   evaluationId: number | null
   queuedAt: string | null
   evaluatedAt: string | null
@@ -680,17 +688,40 @@ export function ResearchStudioScreen() {
       />
 
       {/* Durable evaluation status banner */}
-      {evaluationJobs.some((job) => !['EVALUATED', 'FAILED'].includes(job.status)) && (
+      {evaluationJobs.length > 0 && (
         <div className="mb-4 flex items-center justify-between rounded-lg border border-status-running/40 bg-status-running/10 px-4 py-3 text-caption text-ink">
           <div className="flex items-center gap-3">
-            <RefreshCwIcon className="h-4 w-4 animate-spin text-status-running" />
+            <RefreshCwIcon className={`h-4 w-4 ${evaluationJobs.some((job) => !['EVALUATED', 'FAILED'].includes(job.status)) ? 'animate-spin text-status-running' : 'text-ink-subtle'}`} />
             <div>
               <span className="font-semibold text-ink">
-                {evaluationJobs.filter((job) => !['EVALUATED', 'FAILED'].includes(job.status)).length} evaluation jobs are awaiting verified results.
+                {evaluationJobs.filter((job) => job.status === 'EVALUATED').length}/{evaluationJobs.length} evaluation jobs ready or complete.
               </span>
               <span className="ml-2 text-ink-subtle">
-                Current phases: {Array.from(new Set(evaluationJobs.filter((job) => !['EVALUATED', 'FAILED'].includes(job.status)).map((job) => job.status))).join(', ')}. Read-only status refreshes every 10s.
+                Current phases: {Array.from(new Set(evaluationJobs.map((job) => job.backfillStatus || job.status))).join(', ')}. Read-only status refreshes every 10s.
               </span>
+              <div className="mt-2 space-y-1">
+                {evaluationJobs.map((job) => {
+                  const waiting = job.status !== 'EVALUATED' && job.status !== 'FAILED'
+                  const label = job.status === 'EVALUATED'
+                    ? 'Ready and evaluated'
+                    : job.backfillStatus === 'RETRY_SCHEDULED'
+                      ? `Retry scheduled${job.nextRetryAt ? ` at ${new Date(job.nextRetryAt).toLocaleTimeString()}` : ''}`
+                      : job.backfillStatus === 'REVIEW_REQUIRED'
+                        ? 'Review required'
+                        : job.backfillStatus === 'TERMINAL_FAILURE'
+                          ? 'Terminal failure'
+                          : job.backfillStatus === 'COMPLETE'
+                            ? 'Artifacts verified; evaluation pending'
+                            : job.backfillStatus === 'IN_PROGRESS'
+                              ? 'Retrieving result artifacts'
+                              : 'Waiting for verified result artifacts'
+                  return (
+                    <div key={job.jobId} className={`text-[11px] ${waiting ? 'text-ink-subtle' : job.status === 'FAILED' ? 'text-pnl-negative-text' : 'text-pnl-positive-text'}`}>
+                      Job #{job.jobId}: {label}{job.lastError ? ` — ${job.lastError}` : ''}
+                    </div>
+                  )
+                })}
+              </div>
             </div>
           </div>
           <Button

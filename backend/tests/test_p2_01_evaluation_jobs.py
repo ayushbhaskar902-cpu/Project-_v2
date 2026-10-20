@@ -1,11 +1,13 @@
 """P2-01 durable evaluation lifecycle and evidence-gated readiness tests."""
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 
+from alpha_harness.brain.errors import BrainDailyLimitReached, BrainRateLimited, BrainServiceUnavailable
 from alpha_harness.db.models import (
     EvaluationJob,
     EvaluationJobStatus,
@@ -16,7 +18,11 @@ from alpha_harness.db.models import (
     SimulationRecord,
 )
 from alpha_harness.db.sqlite import Database
-from alpha_harness.evaluation.jobs import EvaluationJobService
+from alpha_harness.evaluation.jobs import (
+    EvaluationJobService,
+    _classify_backfill_error,
+    _safe_error,
+)
 
 
 def _candidate(
@@ -59,6 +65,21 @@ def test_job_transitions_are_monotonic_and_timestamped() -> None:
     assert all((job.submitted_at, job.simulating_at, job.backfill_started_at, job.evaluable_at, job.evaluated_at))
     with pytest.raises(ValueError):
         job.transition(EvaluationJobStatus.QUEUED)
+
+
+def test_p2_04_backfill_error_classification_and_sanitization() -> None:
+    classification, retryable, retry_after = _classify_backfill_error(
+        BrainRateLimited("rate limited", retry_after=42)
+    )
+    assert (classification, retryable, retry_after) == ("RATE_LIMIT", True, 42)
+
+    classification, retryable, _ = _classify_backfill_error(BrainDailyLimitReached("quota"))
+    assert (classification, retryable) == ("DAILY_LIMIT", False)
+
+    classification, retryable, _ = _classify_backfill_error(BrainServiceUnavailable("offline"))
+    assert (classification, retryable) == ("BRAINSERVICEUNAVAILABLE", True)
+
+    assert "token=<redacted>" in _safe_error(RuntimeError("token=secret"))
 
 
 def test_jobs_are_idempotent_per_candidate_attempt_and_distinct_attempts_are_preserved(tmp_path) -> None:
@@ -168,12 +189,18 @@ def test_backfill_failures_retry_then_become_terminal(tmp_path) -> None:
                 async def load_verified_series(self, _alpha_id: str) -> None:
                     raise RuntimeError("vault temporarily unavailable")
 
-            service = EvaluationJobService(db, SimpleNamespace(vault=FailingVault()))
+            now = [datetime(2026, 1, 1, tzinfo=UTC)]
+            service = EvaluationJobService(db, SimpleNamespace(vault=FailingVault()), clock=lambda: now[0])
             job = await service.ensure_job(candidate_id)
-            results = [await service.process_job(job.id) for _ in range(3)]
+            results = []
+            for delay in (0, 30, 60):
+                now[0] += timedelta(seconds=delay)
+                results.append(await service.process_job(job.id))
             assert [result["retryCount"] for result in results] == [1, 2, 3]
             assert results[-1]["status"] == EvaluationJobStatus.FAILED
-            assert results[-1]["lastError"].startswith("permanent after 3 attempts")
+            assert results[0]["status"] == EvaluationJobStatus.RESULT_BACKFILL
+            assert results[0]["nextRetryAt"] is not None
+            assert results[-1]["backfillStatus"] == "REVIEW_REQUIRED"
         finally:
             await db.dispose()
 
