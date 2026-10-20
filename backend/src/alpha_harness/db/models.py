@@ -1195,9 +1195,94 @@ class ResearchEvaluation(Base):
     #: Frozen configuration fingerprint
     config_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     canonical_spec: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-
     evaluated_at: Mapped[datetime | None] = mapped_column(UtcDateTime, default=utcnow)
 
+
+class EvaluationJobStatus(StrEnum):
+    """Durable lifecycle for one candidate evaluation attempt."""
+
+    QUEUED = "QUEUED"
+    SUBMITTED = "SUBMITTED"
+    SIMULATING = "SIMULATING"
+    RESULT_BACKFILL = "RESULT_BACKFILL"
+    EVALUABLE = "EVALUABLE"
+    EVALUATED = "EVALUATED"
+    FAILED = "FAILED"
+
+
+class EvaluationJob(Base):
+    """Durable, idempotent coordination record for post-simulation evaluation."""
+
+    __tablename__ = "evaluation_job"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_id: Mapped[int] = mapped_column(
+        ForeignKey("research_candidate.id", ondelete="CASCADE"), index=True
+    )
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_session.id", ondelete="CASCADE"), index=True
+    )
+    simulation_record_id: Mapped[int | None] = mapped_column(
+        ForeignKey("simulation_record.id", ondelete="SET NULL"), index=True
+    )
+    simulation_attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    status: Mapped[str] = mapped_column(
+        String(24), default=EvaluationJobStatus.QUEUED,
+        server_default=EvaluationJobStatus.QUEUED, index=True,
+    )
+    platform_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    alpha_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    settings_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provenance_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    max_retries: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_evaluation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("research_evaluation.id", ondelete="SET NULL"), nullable=True
+    )
+    queued_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    submitted_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    simulating_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    backfill_started_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    evaluable_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    evaluated_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    failed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("candidate_id", "simulation_attempt", name="uq_evaluation_job_attempt"),
+        Index("ix_evaluation_job_session_status", "session_id", "status"),
+    )
+
+    def transition(self, target: str, *, now: datetime | None = None) -> None:
+        """Apply only evidence-supported monotonic transitions."""
+        allowed = {
+            EvaluationJobStatus.QUEUED: {EvaluationJobStatus.SUBMITTED, EvaluationJobStatus.SIMULATING, EvaluationJobStatus.FAILED},
+            EvaluationJobStatus.SUBMITTED: {EvaluationJobStatus.SIMULATING, EvaluationJobStatus.RESULT_BACKFILL, EvaluationJobStatus.FAILED},
+            EvaluationJobStatus.SIMULATING: {EvaluationJobStatus.RESULT_BACKFILL, EvaluationJobStatus.FAILED},
+            EvaluationJobStatus.RESULT_BACKFILL: {EvaluationJobStatus.EVALUABLE, EvaluationJobStatus.FAILED},
+            EvaluationJobStatus.EVALUABLE: {EvaluationJobStatus.EVALUATED, EvaluationJobStatus.FAILED},
+            EvaluationJobStatus.EVALUATED: set(),
+            EvaluationJobStatus.FAILED: {EvaluationJobStatus.QUEUED},
+        }
+        if target == self.status:
+            return
+        if target not in allowed.get(self.status, set()):
+            raise ValueError(f"Invalid evaluation job transition {self.status} -> {target}")
+        self.status = target
+        stamp = now or utcnow()
+        if target == EvaluationJobStatus.SUBMITTED:
+            self.submitted_at = stamp
+        elif target == EvaluationJobStatus.SIMULATING:
+            self.simulating_at = stamp
+        elif target == EvaluationJobStatus.RESULT_BACKFILL:
+            self.backfill_started_at = stamp
+        elif target == EvaluationJobStatus.EVALUABLE:
+            self.evaluable_at = stamp
+        elif target == EvaluationJobStatus.EVALUATED:
+            self.evaluated_at = stamp
+        elif target == EvaluationJobStatus.FAILED:
+            self.failed_at = stamp
 
 class HoldoutAssessment(Base):
     """Immutable persistent registry of consumed and revealed market holdout windows.

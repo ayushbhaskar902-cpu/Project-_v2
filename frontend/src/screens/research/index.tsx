@@ -201,6 +201,26 @@ interface InsightItem {
   batchBestSharpe: number | null
 }
 
+interface EvaluationJob {
+  jobId: number
+  candidateId: number
+  sessionId: number | null
+  simulationRecordId: number | null
+  simulationAttempt: number
+  platformJobId: string | null
+  alphaId: string | null
+  status: 'QUEUED' | 'SUBMITTED' | 'SIMULATING' | 'RESULT_BACKFILL' | 'EVALUABLE' | 'EVALUATED' | 'FAILED'
+  settingsHash: string | null
+  provenanceHash: string | null
+  retryCount: number
+  maxRetries: number
+  lastError: string | null
+  evaluationId: number | null
+  queuedAt: string | null
+  evaluatedAt: string | null
+  failedAt: string | null
+}
+
 interface PoolResult {
   poolSize: number
   combinedSharpe: number
@@ -266,8 +286,19 @@ export function ResearchStudioScreen() {
   ])
   const [isCreatingCampaign, setIsCreatingCampaign] = useState(false)
 
-  // Simulation status & auto-polling
-  const [pendingSimCount, setPendingSimCount] = useState<number | null>(null)
+  // Durable evaluation status; polling is read-only and survives refreshes.
+  const [evaluationJobs, setEvaluationJobs] = useState<EvaluationJob[]>([])
+
+  const loadEvaluationJobs = useCallback(async (sid: number) => {
+    try {
+      const res = await fetch(`/api/research/sessions/${sid}/evaluation-jobs`, {
+        headers: { 'sec-fetch-site': 'same-origin' },
+      })
+      if (res.ok) setEvaluationJobs(await res.json())
+    } catch (err) {
+      console.error('Failed to load evaluation jobs:', err)
+    }
+  }, [])
 
   // Fetch sessions on load
   const loadSessions = useCallback(async () => {
@@ -325,8 +356,9 @@ export function ResearchStudioScreen() {
   useEffect(() => {
     if (selectedSessionId !== null) {
       loadSessionData(selectedSessionId)
+      loadEvaluationJobs(selectedSessionId)
     }
-  }, [selectedSessionId, loadSessionData])
+  }, [selectedSessionId, loadSessionData, loadEvaluationJobs])
 
   // Actions
   const handleTriggerGeneration = async () => {
@@ -360,7 +392,7 @@ export function ResearchStudioScreen() {
   }
 
   const handleSimulateCandidates = async () => {
-    if (!selectedSessionId) return
+    if (!selectedSessionId || isSimulating) return
     setIsSimulating(true)
     try {
       // 1. Enqueue to BatchEngine for live WorldQuant BRAIN simulation
@@ -387,16 +419,19 @@ export function ResearchStudioScreen() {
 
       if (res.ok) {
         const data = await res.json()
-        if (data.status === 'pending_simulations') {
-          setPendingSimCount(data.pendingSimulations)
+        setEvaluationJobs(data.jobs ?? [])
+        const pending = (data.jobs ?? []).filter((job: EvaluationJob) => !['EVALUATED', 'FAILED'].includes(job.status)).length
+        const failed = (data.jobs ?? []).filter((job: EvaluationJob) => job.status === 'FAILED').length
+        if (pending > 0) {
           toast.info('Simulations Dispatched to BRAIN', {
-            description: `${data.pendingSimulations} simulations running on WorldQuant BRAIN. Auto-polling results...`,
+            description: `${pending} evaluation job${pending === 1 ? '' : 's'} awaiting verified simulation results.`,
           })
         } else if (data.evaluatedCount > 0) {
-          setPendingSimCount(null)
           toast.success(
             `BRAIN Backtest Evaluation Complete: ${data.evaluatedCount} alphas (${data.submissionGradeCount} internal quality passes)`,
           )
+        } else if (failed > 0) {
+          toast.error('Some evaluation jobs failed', { description: `${failed} job${failed === 1 ? '' : 's'} need attention.` })
         } else {
           toast.info('Evaluation Status', {
             description: data.message || 'No completed BRAIN simulations to evaluate yet.',
@@ -415,41 +450,22 @@ export function ResearchStudioScreen() {
     }
   }
 
-  // Auto-polling when simulations are pending on WorldQuant BRAIN
+  // Read-only polling: POST /evaluate is intentionally never used here.
   useEffect(() => {
-    if (pendingSimCount === null || pendingSimCount <= 0 || !selectedSessionId) return
+    if (!selectedSessionId) return
 
     const interval = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/research/sessions/${selectedSessionId}/evaluate`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'sec-fetch-site': 'same-origin',
-            'x-harness-client': '1',
-          },
-          body: JSON.stringify({ cost_bps: 1.5 }),
-        })
-        if (res.ok) {
-          const d = await res.json()
-          if (d.status === 'pending_simulations') {
-            setPendingSimCount(d.pendingSimulations)
-          } else if (d.evaluatedCount > 0) {
-            setPendingSimCount(null)
-            toast.success(
-              `BRAIN Backtest Finished: ${d.evaluatedCount} alphas evaluated (${d.submissionGradeCount} internal quality passes)`,
-            )
-            await loadSessionData(selectedSessionId)
-            await loadSessions()
-          }
-        }
-      } catch (err) {
-        console.error('Auto-poll error:', err)
+      const before = evaluationJobs
+      await loadEvaluationJobs(selectedSessionId)
+      const becameEvaluated = before.some((oldJob) => oldJob.status !== 'EVALUATED' && oldJob.status !== 'FAILED')
+      if (becameEvaluated) {
+        await loadSessionData(selectedSessionId)
+        await loadSessions()
       }
     }, 10000)
 
     return () => clearInterval(interval)
-  }, [pendingSimCount, selectedSessionId, loadSessionData, loadSessions])
+  }, [evaluationJobs, selectedSessionId, loadEvaluationJobs, loadSessionData, loadSessions])
 
   const handleCreateCampaign = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -634,17 +650,17 @@ export function ResearchStudioScreen() {
         }
       />
 
-      {/* Simulation Polling Status Banner */}
-      {pendingSimCount !== null && pendingSimCount > 0 && (
+      {/* Durable evaluation status banner */}
+      {evaluationJobs.some((job) => !['EVALUATED', 'FAILED'].includes(job.status)) && (
         <div className="mb-4 flex items-center justify-between rounded-lg border border-status-running/40 bg-status-running/10 px-4 py-3 text-caption text-ink">
           <div className="flex items-center gap-3">
             <RefreshCwIcon className="h-4 w-4 animate-spin text-status-running" />
             <div>
               <span className="font-semibold text-ink">
-                {pendingSimCount} alpha simulations currently in flight on WorldQuant BRAIN.
+                {evaluationJobs.filter((job) => !['EVALUATED', 'FAILED'].includes(job.status)).length} evaluation jobs are awaiting verified results.
               </span>
               <span className="ml-2 text-ink-subtle">
-                Multi-sim batches take ~1–2 minutes. Auto-polling results every 10s...
+                Current phases: {Array.from(new Set(evaluationJobs.filter((job) => !['EVALUATED', 'FAILED'].includes(job.status)).map((job) => job.status))).join(', ')}. Read-only status refreshes every 10s.
               </span>
             </div>
           </div>
@@ -654,7 +670,7 @@ export function ResearchStudioScreen() {
             disabled={isSimulating}
             onClick={handleSimulateCandidates}
           >
-            Check Now
+              Refresh Status
           </Button>
         </div>
       )}

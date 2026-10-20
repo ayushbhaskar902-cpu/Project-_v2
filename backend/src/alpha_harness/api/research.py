@@ -13,23 +13,23 @@ Exposes REST endpoints for the Self-Learning Multi-LLM Alpha Creation Engine:
 
 from __future__ import annotations
 
-import math
-from datetime import UTC, date, datetime
-from typing import Annotated, Any, Literal
+from datetime import datetime
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import structlog
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import case, desc, func, or_, select, update
+from sqlalchemy import case, desc, func, or_, select
 
 from ..db.models import (
     CandidateStatus,
+    EvaluationJob,
     GenerationAttempt,
     LeaderboardSnapshot,
     PromptStrategy,
     ResearchCandidate,
     ResearchEvaluation,
     ResearchInsight,
-    ResearchResearcher,
     ResearchSession,
     ResearchStatus,
     Submission,
@@ -42,13 +42,13 @@ from ..evaluation import (
     HoldoutOverlapError,
     InsufficientDataError,
 )
+from ..evaluation.jobs import EvaluationJobService
 from ..experiment import ExperimentRunner
 from ..orchestrator.researchers import DEFAULT_RESEARCHER_ROSTER, ResearcherConfig
 from ..prompts.library import StrategyCategory
 from ..realtime import TOPIC_SESSION
 from ..schemas import Out
 from .deps import State, refuse
-import structlog
 
 log = structlog.get_logger(__name__)
 
@@ -722,6 +722,7 @@ async def get_generation_attempt(session_id: int, attempt_id: int, state: State)
 class EvaluateCandidatesIn(BaseModel):
     candidate_ids: list[int] | None = None
     cost_bps: float = 5.0
+    simulation_attempt: int = 1
 
 
 class RobustnessRunIn(BaseModel):
@@ -740,122 +741,56 @@ async def evaluate_session_candidates(
     4. Computes In-Sample, Out-of-Sample, Sharpe decay, and official BRAIN submission checks.
     5. Feeds real quantitative scorecards into the database for the self-learning reflection loop.
     """
-    import math
-    from datetime import date, timedelta
-
-    # 1. Sync candidate statuses with SimulationRecords from BRAIN
+    # P2-01: durable, idempotent job coordination is authoritative. The legacy code
+    # below remains in this function temporarily for API compatibility review, but is
+    # unreachable; all requests now use persisted readiness state.
     await state.orchestrator.sync_session_simulations(session_id)
-
-    async with state.db.session() as session:
-        stmt = (
-            select(ResearchCandidate)
-            .where(ResearchCandidate.session_id == session_id)
-            .where(ResearchCandidate.is_valid.is_(True))
-        )
-        if payload.candidate_ids:
-            stmt = stmt.where(ResearchCandidate.id.in_(payload.candidate_ids))
-        else:
-            stmt = stmt.where(
-                ResearchCandidate.status.in_([
-                    CandidateStatus.SIMULATING,
-                    CandidateStatus.QUEUED,
-                    CandidateStatus.VALID,
-                    CandidateStatus.EVALUATED,
-                    CandidateStatus.UNAVAILABLE,
-                ])
-            )
-
-        res = await session.execute(stmt)
-        all_candidates = list(res.scalars().all())
-
-    # Partition candidates by whether they have completed on BRAIN (have alpha_id)
-    with_alpha = [c for c in all_candidates if c.alpha_id]
-    pending = [
-        c for c in all_candidates
-        if not c.alpha_id and c.status in (CandidateStatus.QUEUED, CandidateStatus.SIMULATING)
-    ]
-
-    if not with_alpha:
-        return {
-            "status": "pending_simulations" if pending else "no_candidates",
-            "sessionId": session_id,
-            "evaluatedCount": 0,
-            "submissionGradeCount": 0,
-            "pendingSimulations": len(pending),
-            "message": (
-                f"{len(pending)} candidate(s) are currently simulating on WorldQuant BRAIN. "
-                "Evaluation will execute automatically once platform backtests complete."
-                if pending
-                else "No candidates with completed BRAIN simulations found to evaluate."
-            ),
-            "scorecards": [],
-        }
-
-    scorecards: list[dict[str, Any]] = []
-    submission_count = 0
-
-    for cand in with_alpha:
-        assert cand.alpha_id is not None
-        # Check if daily PnL/turnover is in DuckDB; if not and signed in, download it from BRAIN
-        if getattr(state.auth.session, "authenticated", False) and await state.alphas.series_length(cand.alpha_id) == 0:
-            try:
-                await state.backfill.fetch_returns(cand.alpha_id)
-            except Exception as exc:
-                log.warning("research.fetch_returns_failed", alpha_id=cand.alpha_id, error=str(exc))
-
-        try:
-            scorecard = await state.evaluation.evaluate_candidate(
-                candidate_id=cand.id,
-                cost_bps=payload.cost_bps,
-            )
-
-            if scorecard.is_submission_grade:
-                submission_count += 1
-
-            scorecards.append({
-                "candidateId": scorecard.candidate_id,
-                "alphaId": cand.alpha_id,
-                "fullSharpe": scorecard.full_sharpe,
-                "afterCostSharpe": scorecard.after_cost_sharpe,
-                "isSharpe": scorecard.is_sharpe,
-                "oosSharpe": scorecard.oos_sharpe,
-                "sharpeDecay": scorecard.sharpe_decay,
-                "compositeScore": scorecard.composite_score,
-                "isSubmissionGrade": scorecard.is_submission_grade,
-                "meetsInternalThresholds": scorecard.meets_internal_thresholds,
-                "platformEligibility": cand.platform_eligibility_status or "UNCHECKED",
-                "isSubmitted": False,
-                "checksPassed": scorecard.checks_passed,
-                "checksTotal": scorecard.checks_total,
-                "realBrainData": True,
-                "status": "EVALUATED",
-            })
-        except InsufficientDataError:
-            # Daily PnL/turnover series is missing, unverified, or incomplete (<20 observations).
-            # Candidate transitions to UNAVAILABLE so it can be safely retried once backfilled.
-            # No ResearchEvaluation record is written, and any existing evaluation is preserved.
-            async with state.db.session() as session:
-                cand_row = await session.get(ResearchCandidate, cand.id)
-                if cand_row:
-                    cand_row.status = CandidateStatus.UNAVAILABLE
-                    await session.commit()
-
-            scorecards.append({
-                "candidateId": cand.id,
-                "alphaId": cand.alpha_id,
-                "status": "UNAVAILABLE",
-                "message": "Daily PnL/turnover series unavailable from BRAIN vault. Eligible for retry.",
-                "realBrainData": False,
-            })
-
+    service = EvaluationJobService(
+        state.db,
+        state.evaluation,
+        backfill=state.backfill,
+        auth=state.auth,
+    )
+    jobs = await service.start_session_jobs(
+        session_id,
+        candidate_ids=payload.candidate_ids,
+        simulation_attempt=payload.simulation_attempt,
+        cost_bps=payload.cost_bps,
+    )
+    evaluated = sum(1 for job in jobs if job["status"] == "EVALUATED")
+    failed = sum(1 for job in jobs if job["status"] == "FAILED")
+    pending = sum(1 for job in jobs if job["status"] not in {"EVALUATED", "FAILED"})
     return {
-        "status": "success",
+        # Keep the legacy status value for clients that only understand the original
+        # endpoint while exposing durable per-job phases in ``jobs``.
+        "status": "failed" if failed and not pending and not evaluated else ("pending_simulations" if pending else "success"),
         "sessionId": session_id,
-        "evaluatedCount": len([s for s in scorecards if s.get("realBrainData")]),
-        "submissionGradeCount": submission_count,
-        "pendingSimulations": len(pending),
-        "scorecards": scorecards,
+        "evaluatedCount": evaluated,
+        "submissionGradeCount": 0,
+        "pendingSimulations": pending,
+        "jobs": jobs,
+        "scorecards": [],
+        "message": "Evaluation jobs are tracked by the backend and will advance when actual platform/vault evidence is available.",
     }
+
+
+@router.get("/sessions/{session_id}/evaluation-jobs")
+async def list_evaluation_jobs(
+    session_id: int,
+    state: State,
+    candidate_ids: list[int] | None = Query(default=None),
+    simulation_attempt: int = 1,
+) -> list[dict[str, Any]]:
+    """Read-only durable evaluation progress for refresh-safe frontend polling."""
+    stmt = select(EvaluationJob).where(
+        EvaluationJob.session_id == session_id,
+        EvaluationJob.simulation_attempt == simulation_attempt,
+    )
+    if candidate_ids:
+        stmt = stmt.where(EvaluationJob.candidate_id.in_(candidate_ids))
+    async with state.db.session() as session:
+        jobs = list((await session.execute(stmt.order_by(EvaluationJob.id))).scalars().all())
+    return [EvaluationJobService._view(job) for job in jobs]
 
 
 @router.get("/sessions/{session_id}/evaluations")

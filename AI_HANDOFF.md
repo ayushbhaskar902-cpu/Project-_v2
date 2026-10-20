@@ -3,7 +3,7 @@
 **Repository:** `https://github.com/ayushbhaskar902-cpu/Project-_v2.git`  
 **Target Branch:** `main`  
 **Current Date:** October 20, 2026  
-**Current Program State:** P0-01 through P0-05 and P1-01 through P1-16 are **VERIFIED COMPLETE** (329 backend tests passing). **P2-01 is AUDITED — PENDING APPROVAL** as the next implementation task.
+**Current Program State:** P0-01 through P0-05, P1-01 through P1-16, and P2-01 are **VERIFIED COMPLETE**. The full backend suite currently passes **334 tests** with **36 async teardown warnings**. **P2-02 is AUDITED — PENDING APPROVAL**; do not implement it without approval.
 
 ---
 
@@ -108,9 +108,12 @@ The project adheres to the 36 canonical issues defined in `Project_v2_Remediatio
 
 ---
 
-## 4. Next Implementation Step: P2-01
+## 4. Next Implementation Step: P2-02
 
-P1-16 implementation and verification are complete. The next audit is documented in [`docs/remediation/reports/p2_01_audit_report.md`](docs/remediation/reports/p2_01_audit_report.md) and is pending user approval before implementation.
+P2-01 implementation and verification are complete. Its audit and final report are documented in [`docs/remediation/reports/p2_01_audit_report.md`](docs/remediation/reports/p2_01_audit_report.md) and [`docs/remediation/reports/p2_01_final_verification_report.md`](docs/remediation/reports/p2_01_final_verification_report.md). The next audit is [`docs/remediation/reports/p2_02_audit_report.md`](docs/remediation/reports/p2_02_audit_report.md), pending user approval before implementation.
+
+### P2-01 Verification Summary
+P2-01 now persists one idempotent evaluation job per candidate and simulation attempt, reconciles actual `SimulationRecord` and verified-vault evidence, and exposes read-only progress for refresh-safe frontend polling. The frontend no longer repeats `POST /evaluate` while polling. Targeted P2-01 tests: 5 passed. Full backend suite: 334 passed, 36 async teardown warnings, exit code 0.
 
 ### P1-16 Verification Summary
 P1-16 now distinguishes internal quality thresholds, statistical/lifecycle acceptance, verified BRAIN eligibility, and actual submission evidence. The compatibility field `scorecard.is_submission_grade` is explicitly an internal-quality alias only.

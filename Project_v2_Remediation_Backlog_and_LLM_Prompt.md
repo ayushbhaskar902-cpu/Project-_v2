@@ -191,7 +191,7 @@
 **Fix:** Frontend subscribes/polls a persistent job state machine. Backend exposes explicit statuses such as `QUEUED`, `SUBMITTED`, `SIMULATING`, `RESULT_BACKFILL`, `EVALUABLE`, `EVALUATED`, `FAILED`. Trigger evaluation only when required artifacts are available. Do not depend on repeated manual clicks.  
 **Acceptance tests:** Simulated delayed BRAIN response completes without manual re-click; transient failures are recoverable; status transitions are tested.
 
-**Audit:** PENDING APPROVAL — `docs/remediation/reports/p2_01_audit_report.md`.
+**Verification:** COMPLETE ✅ — `docs/remediation/reports/p2_01_final_verification_report.md`.
 
 ### P2-02 — API module contains too much business/research logic
 
@@ -199,6 +199,8 @@
 **Problem:** HTTP routing, BRAIN synchronization, synthetic fallback, evaluation and robustness logic are coupled in a large module.  
 **Fix:** Move business operations into application services (`EvaluationService`, `RobustnessService`, `ExperimentOrchestrator`, etc.) and keep route handlers thin. Make this incremental, not a big-bang rewrite, and only after behavioral tests exist.  
 **Acceptance tests:** Service-level tests run without HTTP routing; route tests verify schemas/status codes; behavior remains unchanged except intentional fixes.
+
+**Audit:** PENDING APPROVAL — `docs/remediation/reports/p2_02_audit_report.md`.
 
 ### P2-03 — Researcher failures may be converted into missing output
 

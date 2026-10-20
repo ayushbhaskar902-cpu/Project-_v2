@@ -2,8 +2,8 @@
 
 **Canonical issue title:** Frontend can evaluate before BRAIN simulations finish
 **Canonical problem statement:** Workflow can enqueue simulations and immediately call evaluate; asynchronous BRAIN completion/backfill may not be ready.
-**Status:** AUDITED — PENDING APPROVAL
-**Implementation:** Not started
+**Status:** IMPLEMENTED AND VERIFIED — see `p2_01_final_verification_report.md`
+**Implementation:** Complete on the current working tree; approval was received before implementation.
 
 ## Findings
 
