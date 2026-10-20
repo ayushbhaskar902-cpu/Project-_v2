@@ -41,29 +41,59 @@ jobs:
         run: uv sync --frozen --directory backend
 
       - name: Target P2-04 backfill regressions
+        id: p204
+        continue-on-error: true
         working-directory: backend
         run: >-
           uv run --frozen --with pytest==8.4.2 python -m pytest
           tests/test_p2_01_evaluation_jobs.py::test_p2_04_backfill_error_classification_and_sanitization
           tests/test_p2_01_evaluation_jobs.py::test_backfill_failures_retry_then_become_terminal
           tests/test_p2_01_evaluation_jobs.py::test_job_is_evaluable_only_after_verified_result_is_persisted
-          -vv -ra
+          -vv -ra --junitxml=../p2-04-targeted.xml
 
       - name: P2-01 evaluation-job suite
+        id: p201
+        continue-on-error: true
         working-directory: backend
-        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_01_evaluation_jobs.py -q -ra
+        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_01_evaluation_jobs.py -q -ra --junitxml=../p2-01.xml
 
-      - name: P0 P1 P2-02 and P2-03 regressions
+      - name: P0 regressions
+        id: p0
+        continue-on-error: true
         working-directory: backend
         run: >-
-          uv run --frozen --with pytest==8.4.2 python -m pytest
-          tests/test_p0_*.py tests/test_p1_*.py
-          tests/test_p2_02_research_services.py tests/test_p2_03_researcher_attempts.py
-          -q -ra
+          uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p0_*.py
+          -q -ra --junitxml=../p0.xml
+
+      - name: P1 regressions
+        id: p1
+        continue-on-error: true
+        working-directory: backend
+        run: >-
+          uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p1_*.py
+          -q -ra --junitxml=../p1.xml
+
+      - name: P2-02 regression
+        id: p202
+        continue-on-error: true
+        working-directory: backend
+        run: >-
+          uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_02_research_services.py
+          -q -ra --junitxml=../p2-02.xml
+
+      - name: P2-03 regression
+        id: p203
+        continue-on-error: true
+        working-directory: backend
+        run: >-
+          uv run --frozen --with pytest==8.4.2 python -m pytest tests/test_p2_03_researcher_attempts.py
+          -q -ra --junitxml=../p2-03.xml
 
       - name: Complete backend suite
+        id: backend
+        continue-on-error: true
         working-directory: backend
-        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests --tb=short -q -ra
+        run: uv run --frozen --with pytest==8.4.2 python -m pytest tests --tb=short -q -ra --junitxml=../backend-full.xml
 
       - uses: pnpm/action-setup@v6
         with:
@@ -77,8 +107,65 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
       - name: Frontend checks
+        id: frontend_check
+        continue-on-error: true
         working-directory: frontend
         run: pnpm check
       - name: Frontend build
+        id: frontend_build
+        continue-on-error: true
+        working-directory: frontend
+        run: pnpm build
+
+      - name: Publish test result files
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: p2-04-verification-results
+          path: "*.xml"
+          if-no-files-found: ignore
+
+      - name: Preserve aggregate verification status
+        if: always()
+        env:
+          P204: ${{ steps.p204.outcome }}
+          P201: ${{ steps.p201.outcome }}
+          P0: ${{ steps.p0.outcome }}
+          P1: ${{ steps.p1.outcome }}
+          P202: ${{ steps.p202.outcome }}
+          P203: ${{ steps.p203.outcome }}
+          BACKEND: ${{ steps.backend.outcome }}
+          FRONTEND_CHECK: ${{ steps.frontend_check.outcome }}
+          FRONTEND_BUILD: ${{ steps.frontend_build.outcome }}
+        run: |
+          printf 'P2-04=%s P2-01=%s P0=%s P1=%s P2-02=%s P2-03=%s backend=%s frontend-check=%s frontend-build=%s\n' \
+            "$P204" "$P201" "$P0" "$P1" "$P202" "$P203" "$BACKEND" "$FRONTEND_CHECK" "$FRONTEND_BUILD"
+          test "$P204" = success && test "$P201" = success && test "$P0" = success \
+            && test "$P1" = success && test "$P202" = success && test "$P203" = success \
+            && test "$BACKEND" = success && test "$FRONTEND_CHECK" = success && test "$FRONTEND_BUILD" = success
+
+  frontend-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 2be883eea92d92e946c68352fca5cb40651a1a83
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: frontend/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.node-version
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install locked baseline frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Baseline frontend checks
+        continue-on-error: true
+        working-directory: frontend
+        run: pnpm check
+      - name: Baseline frontend build
+        continue-on-error: true
         working-directory: frontend
         run: pnpm build
