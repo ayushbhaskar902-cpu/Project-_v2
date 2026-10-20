@@ -2,11 +2,11 @@
 
 **Canonical issue:** Composite score is hard-coded without calibrated justification.
 
-**Status:** **VERIFIED COMPLETE — LOCAL CHECKPOINT PENDING** (verification gates passed on the final local source/test snapshot; no commit/push has yet been made).
+**Status:** **VERIFIED COMPLETE — COMMITTED LOCALLY; PUSH PENDING** (all verification gates passed; implementation checkpoint is `d6a18ced8dd9497b365d024b30686197ce803cdb`).
 
 **Approval:** Approved for implementation on 2026-10-20. No approval to recalibrate weights was given or inferred.
 
-**Repository checkpoint:** `01a12ba16c4e82a5017027d53ab85b99077f435d` (`main`, same as `origin/main` at start). No commit or push was made.
+**Repository base:** `01a12ba16c4e82a5017027d53ab85b99077f435d` (`main`, same as `origin/main` before checkpoint). Implementation checkpoint: `d6a18ced8dd9497b365d024b30686197ce803cdb`; push is pending.
 
 **Latest tested source/test snapshot:** base `01a12ba16c4e82a5017027d53ab85b99077f435d`, with local modifications. SHA-256 of the sorted path-and-file-hash manifest over every modified/untracked backend source, backend test, and frontend source file: `50d85f47b06f3844778d5108c7a6c5fe3da413f41192e573b15df58ac848fd36` (12 files). The source snapshot includes the final lint-only line wrap in researcher memory. `origin/main` was last refreshed at `01a12ba16c4e82a5017027d53ab85b99077f435d`; a final refresh is required before checkpointing.
 
@@ -91,4 +91,4 @@ The full backend suite was attempted once after a lint-only line-wrap correction
 
 Independent source/test review found and corrected two Ruff E501 findings on changed lines; no behavioral defect remains identified within P2-06. The behavioral tests exercise persistence reopen/migration, actual API endpoint payloads, downstream leaderboard and memory consumption, portfolio selection, and holdout mutation rather than relying only on formula helpers. Existing formula coefficients remain untouched. Deferred calibration, ablation, sensitivity analysis, historical-version inventory, and cross-cohort robustness remain open; `DEFERRED-TEST-01` and all other prior entries are preserved.
 
-**Verification decision:** P2-06 is **VERIFIED COMPLETE locally** on the exact manifest above. No commit or push has yet occurred. Before checkpointing, inspect the complete staged file list, refresh `origin/main`, and ensure only intended P2-06 files are included. P2-07 remains gated until that checkpoint is confirmed.
+**Verification decision:** P2-06 is **VERIFIED COMPLETE** on the exact manifest above and has been committed locally as `d6a18ced8dd9497b365d024b30686197ce803cdb`. The staged-file list was reviewed and contained only 17 intended P2-06 implementation, test, and tracking files; the pre-existing untracked `p2_07_audit_report.md` remains excluded. `origin/main` was refreshed immediately before this commit and was still the base revision. Push confirmation remains pending. P2-07 is gated until the checkpoint is confirmed remotely.
